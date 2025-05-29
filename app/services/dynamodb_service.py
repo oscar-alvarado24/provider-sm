@@ -16,21 +16,39 @@ from app.models.provider import (
 )
 
 class DynamoDBService:
-    def __init__(self):
-        self.table_name = os.getenv("DYNAMODB_TABLE_NAME", "providers")
-        self.aws_region = os.getenv("AWS_REGION_NAME", "us-east-1")
-        self.dynamodb_endpoint_url = os.getenv("DYNAMODB_ENDPOINT_URL") # For local development with DynamoDB Local
+    def __init__(self, table_name: str, region_name: Optional[str] = None, endpoint_url: Optional[str] = None):
+        self.table_name = table_name
+        self.region_name = region_name
+        self.endpoint_url = endpoint_url
 
-        if self.dynamodb_endpoint_url:
-            self.dynamodb = boto3.resource(
-                'dynamodb',
-                region_name=self.aws_region,
-                endpoint_url=self.dynamodb_endpoint_url
-            )
-        else:
-            self.dynamodb = boto3.resource('dynamodb', region_name=self.aws_region)
+        dynamodb_args = {}
+        if self.region_name:
+            dynamodb_args['region_name'] = self.region_name
+        if self.endpoint_url:
+            dynamodb_args['endpoint_url'] = self.endpoint_url
+        
+        # For local testing with dummy credentials if endpoint_url is set and no real AWS creds are configured
+        if self.endpoint_url and not (os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY')):
+            if not os.getenv('AWS_SESSION_TOKEN'): # check if not using temp creds from IAM role
+                dynamodb_args['aws_access_key_id'] = os.getenv('AWS_ACCESS_KEY_ID', 'dummy')
+                dynamodb_args['aws_secret_access_key'] = os.getenv('AWS_SECRET_ACCESS_KEY', 'dummy')
 
-        self.table = self.dynamodb.Table(self.table_name)
+        try:
+            # print(f"Initializing DynamoDBService with table: {self.table_name}, region: {self.region_name}, endpoint: {self.endpoint_url}")
+            # print(f"Boto3 resource args: {dynamodb_args}")
+            self.dynamodb = boto3.resource('dynamodb', **dynamodb_args)
+            self.table = self.dynamodb.Table(self.table_name)
+            # Optional: Add a check to see if the table actually exists and is accessible
+            # self.table.load() 
+            # print(f"Successfully connected to table '{self.table_name}'.")
+        except ClientError as e:
+            # print(f"Error initializing DynamoDB client or table: {e}")
+            # Depending on desired behavior, either raise the error or handle it
+            # For now, let's re-raise or raise a custom exception
+            raise ConnectionError(f"Failed to connect to DynamoDB table '{self.table_name}': {e}")
+        except Exception as e: # Catch other potential errors during initialization
+            # print(f"An unexpected error occurred during DynamoDBService initialization: {e}")
+            raise ConnectionError(f"Unexpected error initializing DynamoDBService: {e}")
 
     def _branch_create_to_dict(self, branch_data: BranchCreate) -> Dict[str, Any]:
         return branch_data.dict()
@@ -136,14 +154,20 @@ class DynamoDBService:
             raise
 
     def get_providers_by_city_and_service(self, city: str, service: str) -> List[ProviderResponse]:
-        # For production, a Global Secondary Index (GSI) on 'address' (or a dedicated 'city' field)
-        # and 'services' would be highly recommended for performance instead of a scan.
-        # Example GSI: city-services-index (Partition Key: city, Sort Key: services)
-        # or a composite GSI if queries are more complex.
-        # Scanning can be slow and expensive on large tables.
-        items = []
+        """
+        Retrieves providers that offer a specific service and have at least one branch in the specified city.
+        Service matching is case-sensitive. City matching is case-insensitive.
+        Filtering by service is done at the DynamoDB level using Scan's FilterExpression.
+        Filtering by city is done on the client-side (Python) due to limitations with querying
+        nested objects in a list with DynamoDB Scan filters directly for case-insensitivity.
+        A GSI on 'services' (for service filtering) and potentially a composite GSI involving city
+        would be more performant in production than a full scan followed by client-side filtering.
+        """
+        all_scanned_items = []
+        # Step 1: Scan DynamoDB for providers offering the specified service.
         scan_kwargs = {
-            'FilterExpression': Attr('address').contains(city) & Attr('services').contains(service)
+            'FilterExpression': Attr('services').contains(service)
+            # Consider adding ProjectionExpression if not all attributes are needed for this operation
         }
 
         try:
@@ -153,19 +177,44 @@ class DynamoDBService:
                 if start_key:
                     scan_kwargs['ExclusiveStartKey'] = start_key
                 response = self.table.scan(**scan_kwargs)
-                items.extend(response.get('Items', []))
+                all_scanned_items.extend(response.get('Items', []))
                 start_key = response.get('LastEvaluatedKey', None)
                 done = start_key is None
-
-            providers = []
-            for item in items:
-                # Ensure branches from DB (list of dicts) are converted to list of Branch models
-                item['branches'] = [Branch(**branch_dict) for branch_dict in item.get('branches', [])]
-                providers.append(ProviderResponse(**item))
-            return providers
         except ClientError as e:
-            print(f"Error scanning providers by city and service from DynamoDB: {e}")
-            raise
+            print(f"Error scanning providers by service from DynamoDB: {e}")
+            raise # Or handle more gracefully
+
+        # Step 2: Client-side filtering for city (case-insensitive) and constructing response.
+        results: List[ProviderResponse] = []
+        city_lower = city.lower()
+
+        for item in all_scanned_items:
+            # The 'service' check is already handled by the Scan FilterExpression.
+            # Now, check if any branch is in the specified city.
+            has_branch_in_city = False
+            if 'branches' in item and isinstance(item['branches'], list):
+                for branch_data in item['branches']:
+                    # Ensure branch_data is a dict and has a 'city' key
+                    if isinstance(branch_data, dict) and branch_data.get('city', '').lower() == city_lower:
+                        has_branch_in_city = True
+                        break # Found a matching branch, no need to check others for this provider
+            
+            if has_branch_in_city:
+                try:
+                    # Convert branch dicts to Branch models
+                    # This is crucial for Pydantic validation and correct response structure.
+                    branch_models = [Branch(**b_data) for b_data in item.get('branches', [])]
+                    # Create a copy of item to avoid modifying the original scanned item dict directly
+                    provider_data_for_model = item.copy()
+                    provider_data_for_model['branches'] = branch_models
+                    
+                    results.append(ProviderResponse(**provider_data_for_model))
+                except Exception as e: # Catch potential Pydantic validation errors or other issues
+                    print(f"Error converting DynamoDB item to ProviderResponse for item ID {item.get('id')}: {e}")
+                    # Decide if you want to skip this item or raise an error
+                    continue 
+        
+        return results
 
     def get_provider_name_by_id(self, provider_id: str) -> Optional[ProviderNameResponse]:
         try:
@@ -190,142 +239,163 @@ class DynamoDBService:
 # Example usage (for testing locally, not part of the service class itself)
 if __name__ == '__main__':
     # Configure for local DynamoDB (ensure DynamoDB local is running)
-    os.environ["DYNAMODB_TABLE_NAME"] = "providers-local"
-    os.environ["AWS_REGION_NAME"] = "localhost"
-    os.environ["DYNAMODB_ENDPOINT_URL"] = "http://localhost:8000"
-    # Create table if it doesn't exist (simplified for example)
+    local_table_name = "providers-local-filtering-test"
+    local_region_name = "localhost" 
+    local_endpoint_url = "http://localhost:8000"
+
+    # Create table if it doesn't exist
     try:
-        ddb_resource = boto3.resource('dynamodb', endpoint_url=os.environ["DYNAMODB_ENDPOINT_URL"])
-        ddb_resource.create_table(
-            TableName=os.environ["DYNAMODB_TABLE_NAME"],
+        ddb_resource_for_test = boto3.resource(
+            'dynamodb',
+            endpoint_url=local_endpoint_url,
+            region_name=local_region_name,
+            aws_access_key_id='dummy',
+            aws_secret_access_key='dummy'
+        )
+        # Delete table if it exists, to ensure clean state for tests
+        try:
+            table_to_delete = ddb_resource_for_test.Table(local_table_name)
+            table_to_delete.delete()
+            print(f"Waiting for table {local_table_name} to be deleted...")
+            table_to_delete.wait_until_not_exists()
+            print(f"Table {local_table_name} deleted.")
+        except ClientError as ce:
+            if ce.response['Error']['Code'] != 'ResourceNotFoundException':
+                print(f"Error deleting existing table {local_table_name}: {ce}")
+                # raise # Optional: re-raise if this is critical
+
+        ddb_resource_for_test.create_table(
+            TableName=local_table_name,
             KeySchema=[{'AttributeName': 'id', 'KeyType': 'HASH'}],
             AttributeDefinitions=[{'AttributeName': 'id', 'AttributeType': 'S'}],
             ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
         )
-        print(f"Table {os.environ['DYNAMODB_TABLE_NAME']} created.")
-        # Wait for table to be created
-        ddb_resource.meta.client.get_waiter('table_exists').wait(TableName=os.environ["DYNAMODB_TABLE_NAME"])
+        print(f"Table {local_table_name} creation initiated.")
+        ddb_resource_for_test.meta.client.get_waiter('table_exists').wait(TableName=local_table_name)
+        print(f"Table {local_table_name} created/confirmed existing.")
     except ClientError as e:
         if e.response['Error']['Code'] == 'ResourceInUseException':
-            print(f"Table {os.environ['DYNAMODB_TABLE_NAME']} already exists.")
+            print(f"Table {local_table_name} already exists (from a parallel creation perhaps, or delete failed).")
         else:
-            raise
+            print(f"Error during table setup for test: {e}")
+            exit(1)
 
-    service = DynamoDBService()
-
-    # Test create_provider
-    print("\n--- Testing Create Provider ---")
-    new_provider_data = ProviderCreate(
-        name="Test Provider Alpha",
-        email="alpha@test.com",
-        address="100 Alpha St, Testville, USA",
-        phone="555-0100",
-        services=["Service A", "Service B"],
-        branches=[
-            BranchCreate(name="Alpha Branch 1", address="101 Alpha St, Testville", phone="555-0101", manager_name="Manager A1", email="ma1@test.com"),
-            BranchCreate(name="Alpha Branch 2", address="102 Alpha St, Testville", phone="555-0102", manager_name="Manager A2", email="ma2@test.com")
-        ]
+    service = DynamoDBService(
+        table_name=local_table_name,
+        region_name=local_region_name,
+        endpoint_url=local_endpoint_url
     )
-    created_provider = service.create_provider(new_provider_data)
-    if created_provider:
-        print(f"Created Provider: {created_provider.id} - {created_provider.name}")
-        provider_id_to_test = created_provider.id
-    else:
-        print("Failed to create provider.")
-        exit() # Stop if creation fails
+    print(f"DynamoDBService instantiated for table: {service.table_name}")
 
-    # Test get_provider_by_id
-    print("\n--- Testing Get Provider By ID ---")
-    provider = service.get_provider_by_id(provider_id_to_test)
-    if provider:
-        print(f"Got Provider: {provider.name}, Services: {provider.services}, Branches: {[b.name for b in provider.branches]}")
-    else:
-        print(f"Provider with ID {provider_id_to_test} not found.")
+    # Test Data
+    providers_data = [
+        ProviderCreate(
+            name="Cloud Pros",
+            email="contact@cloudpros.com", address="100 Main St, CloudCity, USA", phone="555-0100",
+            services=["Cloud Migration", "Cloud Security", "Consulting"],
+            branches=[
+                BranchCreate(name="CP North", address="1 N Cloud Ave", city="CloudCity", phone="555-0101", manager_name="Abe N", email="abe@cp.com"),
+                BranchCreate(name="CP Metro", address="50 Urban Rd", city="Metroville", phone="555-0102", manager_name="Bea M", email="bea@cp.com")
+            ]),
+        ProviderCreate(
+            name="Data Gurus",
+            email="info@datagurus.com", address="200 Data Dr, DataTown, USA", phone="555-0200",
+            services=["Data Analytics", "Consulting", "AI Solutions"],
+            branches=[
+                BranchCreate(name="DG Central", address="10 Central Plaza", city="Metroville", phone="555-0201", manager_name="Cid C", email="cid@dg.com"),
+                BranchCreate(name="DG West", address="25 West End", city="Metroville", phone="555-0202", manager_name="Deb W", email="deb@dg.com"),
+                BranchCreate(name="DG Oldtown", address="5 Old Mill Rd", city="Oldtown", phone="555-0203", manager_name="Ed O", email="ed@dg.com")
+            ]),
+        ProviderCreate(
+            name="Security Experts Inc.",
+            email="secure@secexp.com", address="300 Secure Blvd, SecureCity, USA", phone="555-0300",
+            services=["Cloud Security", "Network Security"],
+            branches=[
+                BranchCreate(name="SE Downtown", address="1 Secure Sq", city="Metroville", phone="555-0301", manager_name="Fae D", email="fae@se.com"),
+                BranchCreate(name="SE CloudWatch", address="90 Cloud Ave", city="CloudCity", phone="555-0302", manager_name="Gil C", email="gil@se.com")
+            ]),
+        ProviderCreate(
+            name="Consultants Collective",
+            email="contact@cc.com", address="400 Consult Cir, ThinkTank, USA", phone="555-0400",
+            services=["Consulting"], # Only consulting
+            branches=[
+                BranchCreate(name="CC Metro", address="77 Consult St", city="Metroville", phone="555-0401", manager_name="Hal M", email="hal@cc.com")
+            ])
+    ]
+    provider_ids = {}
+    print("\n--- Creating Test Providers ---")
+    for pd in providers_data:
+        created = service.create_provider(pd)
+        provider_ids[created.name] = created.id
+        print(f"Created: {created.name} (ID: {created.id})")
 
-    # Test get_provider_name_by_id
-    print("\n--- Testing Get Provider Name By ID ---")
-    provider_name_info = service.get_provider_name_by_id(provider_id_to_test)
-    if provider_name_info:
-        print(f"Got Provider Name Info: {provider_name_info.id} - {provider_name_info.name}")
-    else:
-        print(f"Provider with ID {provider_id_to_test} not found for name query.")
-
-
-    # Test update_provider
-    print("\n--- Testing Update Provider ---")
-    update_payload = ProviderUpdate(
-        name="Test Provider Alpha (Updated)",
-        services=["Service A", "Service C"], # Updated services
-        phone="555-0199"
-    )
-    updated_provider = service.update_provider(provider_id_to_test, update_payload)
-    if updated_provider:
-        print(f"Updated Provider: {updated_provider.name}, Services: {updated_provider.services}, Phone: {updated_provider.phone}")
-        print(f"Updated Provider Branches: {[b.name for b in updated_provider.branches]}") # Should be original branches
-    else:
-        print(f"Failed to update provider {provider_id_to_test}.")
-
-    # Test update_provider - updating branches
-    print("\n--- Testing Update Provider (Branches) ---")
-    update_branches_payload = ProviderUpdate(
-        branches=[
-            BranchCreate(name="Alpha Branch 1 Remodeled", address="101 Alpha St, Testville", phone="555-0101", manager_name="Manager A1 New", email="ma1new@test.com"),
-            BranchCreate(name="Alpha Branch X", address="777 X St, Testville", phone="555-010X", manager_name="Manager AX", email="max@test.com")
-        ]
-    )
-    updated_provider_branches = service.update_provider(provider_id_to_test, update_branches_payload)
-    if updated_provider_branches:
-        print(f"Updated Provider (Branches): {updated_provider_branches.name}")
-        print(f"Branches: {[b.name for b in updated_provider_branches.branches]}")
-    else:
-        print(f"Failed to update provider branches for {provider_id_to_test}.")
-
-
-    # Test get_providers_by_city_and_service
+    # Test Scenarios for get_providers_by_city_and_service
     print("\n--- Testing Get Providers by City and Service ---")
-    # Create another provider for testing scan
-    service.create_provider(ProviderCreate(
-        name="Test Provider Beta",
-        email="beta@test.com",
-        address="200 Beta Ave, Testville, USA", # Same city
-        phone="555-0200",
-        services=["Service C", "Service D"], # One common service with updated Alpha
-        branches=[BranchCreate(name="Beta Branch 1", address="201 Beta Ave", phone="555-0201", manager_name="Manager B1", email="mb1@test.com")]
-    ))
-    service.create_provider(ProviderCreate(
-        name="Test Provider Gamma",
-        email="gamma@test.com",
-        address="300 Gamma Rd, Otherville, USA", # Different city
-        phone="555-0300",
-        services=["Service C"],
-        branches=[BranchCreate(name="Gamma Branch 1", address="301 Gamma Rd", phone="555-0301", manager_name="Manager G1", email="mg1@test.com")]
-    ))
 
-    filtered_providers = service.get_providers_by_city_and_service(city="Testville", service="Service C")
-    print(f"Providers in Testville offering Service C: {[p.name for p in filtered_providers]}")
-    if "Test Provider Alpha (Updated)" in [p.name for p in filtered_providers] and "Test Provider Beta" in [p.name for p in filtered_providers]:
-        print("Scan Test successful for finding relevant providers.")
-    else:
-        print("Scan Test failed or found unexpected providers.")
-        for p in filtered_providers:
-            print(f"Found: {p.name} with services {p.services} in address {p.address}")
+    # Scenario 1: City "Metroville", Service "Consulting"
+    # Expected: Cloud Pros, Data Gurus, Consultants Collective
+    results1 = service.get_providers_by_city_and_service(city="Metroville", service="Consulting")
+    names1 = sorted([p.name for p in results1])
+    print(f"Metroville/Consulting: {names1}")
+    assert names1 == sorted(["Cloud Pros", "Data Gurus", "Consultants Collective"]), f"FAIL Scenario 1: Expected Cloud Pros, Data Gurus, CC. Got {names1}"
+    print("PASS: Metroville/Consulting")
 
+    # Scenario 2: City "CloudCity", Service "Cloud Security"
+    # Expected: Cloud Pros, Security Experts Inc.
+    results2 = service.get_providers_by_city_and_service(city="CloudCity", service="Cloud Security")
+    names2 = sorted([p.name for p in results2])
+    print(f"CloudCity/Cloud Security: {names2}")
+    assert names2 == sorted(["Cloud Pros", "Security Experts Inc."]), f"FAIL Scenario 2: Expected Cloud Pros, SE Inc. Got {names2}"
+    print("PASS: CloudCity/Cloud Security")
 
-    # Test delete_provider
-    print("\n--- Testing Delete Provider ---")
-    delete_status = service.delete_provider(provider_id_to_test)
-    print(f"Deletion status for provider {provider_id_to_test}: {delete_status}")
-    provider_after_delete = service.get_provider_by_id(provider_id_to_test)
-    if provider_after_delete is None:
-        print(f"Provider {provider_id_to_test} successfully deleted.")
-    else:
-        print(f"Provider {provider_id_to_test} still exists after deletion attempt.")
+    # Scenario 3: City "Oldtown", Service "AI Solutions"
+    # Expected: Data Gurus
+    results3 = service.get_providers_by_city_and_service(city="Oldtown", service="AI Solutions")
+    names3 = sorted([p.name for p in results3])
+    print(f"Oldtown/AI Solutions: {names3}")
+    assert names3 == ["Data Gurus"], f"FAIL Scenario 3: Expected Data Gurus. Got {names3}"
+    print("PASS: Oldtown/AI Solutions")
+    
+    # Scenario 4: City "Metroville", Service "Data Analytics" (case sensitive service check)
+    # Expected: Data Gurus
+    results4 = service.get_providers_by_city_and_service(city="metroville", service="Data Analytics") # city case-insensitive
+    names4 = sorted([p.name for p in results4])
+    print(f"metroville/Data Analytics: {names4}")
+    assert names4 == ["Data Gurus"], f"FAIL Scenario 4: Expected Data Gurus. Got {names4}"
+    print("PASS: metroville/Data Analytics (case-insensitive city)")
 
-    # Test delete non-existent provider
-    print("\n--- Testing Delete Non-existent Provider ---")
-    delete_status_non_existent = service.delete_provider("non-existent-id")
-    print(f"Deletion status for non-existent provider: {delete_status_non_existent}")
-    if not delete_status_non_existent:
-        print("Correctly reported non-existent provider for deletion.")
-    else:
-        print("Incorrectly reported deletion for non-existent provider.")
+    # Scenario 5: City "NonExistentCity", Service "Consulting"
+    # Expected: []
+    results5 = service.get_providers_by_city_and_service(city="NonExistentCity", service="Consulting")
+    names5 = sorted([p.name for p in results5])
+    print(f"NonExistentCity/Consulting: {names5}")
+    assert names5 == [], f"FAIL Scenario 5: Expected []. Got {names5}"
+    print("PASS: NonExistentCity/Consulting")
+
+    # Scenario 6: City "Metroville", Service "NonExistentService"
+    # Expected: []
+    results6 = service.get_providers_by_city_and_service(city="Metroville", service="NonExistentService")
+    names6 = sorted([p.name for p in results6])
+    print(f"Metroville/NonExistentService: {names6}")
+    assert names6 == [], f"FAIL Scenario 6: Expected []. Got {names6}"
+    print("PASS: Metroville/NonExistentService")
+    
+    # Scenario 7: Service offered by provider, but no branch in that city
+    # Cloud Pros offers "Cloud Migration", but not in "Oldtown"
+    results7 = service.get_providers_by_city_and_service(city="Oldtown", service="Cloud Migration")
+    names7 = sorted([p.name for p in results7])
+    print(f"Oldtown/Cloud Migration: {names7}")
+    assert names7 == [], f"FAIL Scenario 7: Expected []. Got {names7}"
+    print("PASS: Oldtown/Cloud Migration (service exists, but not in city)")
+
+    print("\n--- All get_providers_by_city_and_service tests passed! ---")
+
+    # Clean up: Delete all created test providers
+    print("\n--- Cleaning up test providers ---")
+    for name, provider_id in provider_ids.items():
+        if service.delete_provider(provider_id):
+            print(f"Deleted provider: {name} (ID: {provider_id})")
+        else:
+            print(f"Failed to delete provider: {name} (ID: {provider_id})")
+    
+    print("\nLocal tests for DynamoDBService completed.")

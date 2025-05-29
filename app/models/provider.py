@@ -5,7 +5,8 @@ import uuid
 # Branch Models
 class BranchBase(BaseModel):
     name: str = Field(..., example="Main Branch")
-    address: str = Field(..., example="123 Main St, Anytown, USA")
+    address: str = Field(..., example="123 Main St") # City is now a separate field
+    city: str = Field(..., example="Anytown")
     phone: str = Field(..., example="555-123-4567")
     manager_name: str = Field(..., example="Jane Doe")
     email: str = Field(..., example="jane.doe@example.com")
@@ -71,5 +72,5 @@ class ProviderNameResponse(BaseModel):
     name: str = Field(..., example="Tech Solutions Inc.")
 
 class ProviderFilterQueryParams(BaseModel):
-    city: str = Field(..., example="Anytown")
+    city: str = Field(..., example="Anytown") # This 'city' refers to the branch's city
     service: str = Field(..., example="Cloud Computing")

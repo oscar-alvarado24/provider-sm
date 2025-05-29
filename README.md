@@ -18,7 +18,7 @@ Brief description of the microservice: Manages provider information (companies, 
 │   ├── main.py           # FastAPI application entry point
 │   ├── models/           # Pydantic models
 │   │   ├── __init__.py
-│   │   └── provider.py
+│   │   └── provider.py   # Defines Provider, Branch, etc.
 │   ├── routers/          # API routers (controllers)
 │   │   ├── __init__.py
 │   │   └── provider_router.py
@@ -30,6 +30,19 @@ Brief description of the microservice: Manages provider information (companies, 
 ├── README.md             # This file
 ├── requirements.txt      # Python dependencies
 └── sonar-project.properties # SonarQube configuration (placeholder)
+```
+
+### Key Data Model Update (Branch)
+The `Branch` model, as defined in `app/models/provider.py` and used in provider data, now includes a dedicated `city` field:
+```json
+{
+  "name": "Downtown Office",
+  "address": "100 Business Rd",
+  "city": "Metropolis",
+  "phone": "555-0100",
+  "manager_name": "Alice Wonderland",
+  "email": "alice.wonderland@example.com"
+}
 ```
 
 ## Prerequisites
@@ -75,6 +88,7 @@ Brief description of the microservice: Manages provider information (companies, 
     # AWS_ACCESS_KEY_ID=your_dummy_access_key # Not needed if IAM configured
     # AWS_SECRET_ACCESS_KEY=your_dummy_secret_key # Not needed if IAM configured
     ```
+    Ensure your `.env` file is correctly configured. The application uses these settings (via `app/config.py`) to establish the connection to DynamoDB. The service initialization has been made robust to use these settings.
 
 ## Running DynamoDB Locally (Optional)
 If you prefer to develop locally without connecting to AWS, you can use DynamoDB Local.
@@ -116,7 +130,7 @@ Brief overview of main endpoints (details available in Swagger UI):
 - `GET /providers/{provider_id}`: Get a provider by their ID.
 - `PUT /providers/{provider_id}`: Update an existing provider.
 - `DELETE /providers/{provider_id}`: Delete a provider.
-- `GET /providers/`: Filter providers by city and service (e.g., `/providers/?city=Anytown&service=Consulting`).
+- `GET /providers/`: Filter providers by branch city and service (e.g., `/providers/?city=Anytown&service=Consulting`). The city filter matches against the `city` field within each provider's branches (case-insensitive).
 - `GET /providers/{provider_id}/name`: Get only the name of a provider by ID.
 
 ## SonarQube
@@ -125,7 +139,7 @@ To run an analysis, configure your SonarQube server and use the SonarScanner.
 
 ## To-Do / Potential Enhancements
 - Implement comprehensive unit and integration tests.
-- For `get_providers_by_city_and_service`, consider using a DynamoDB Global Secondary Index (GSI) on `city` and `service` attributes for better query performance in production instead of Scan.
+- For `get_providers_by_city_and_service`, consider using a DynamoDB Global Secondary Index (GSI) to optimize queries by `service`. Filtering by `branch.city` is currently done client-side after retrieving service-matched providers; a more advanced GSI strategy (e.g., on a denormalized city field at the top level, or a composite index) might be needed for very large datasets if city-based querying performance needs to be improved at the DB level, though this is complex with nested branch lists.
 - More sophisticated error handling and logging.
 - Security enhancements (e.g., authentication, authorization).
 - CI/CD pipeline setup.

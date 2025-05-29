@@ -8,17 +8,37 @@ from app.models.provider import (
     ProviderFilterQueryParams
 )
 from app.services.dynamodb_service import DynamoDBService
-import os # For environment variables if needed directly here, though service handles it
+from app.config import settings as app_settings # Renamed to avoid conflict
 
 # Dependency to get DynamoDB service
 # This helps in managing the lifecycle of the service if needed,
 # and makes it easier to mock for testing.
 def get_db_service():
-    # These environment variables should be set for the DynamoDBService to work
-    # Ensure DYNAMODB_TABLE_NAME, AWS_REGION_NAME are set.
-    # DYNAMODB_ENDPOINT_URL is optional (for local DynamoDB)
-    # The DynamoDBService class already has defaults and handles os.getenv
-    return DynamoDBService()
+    # The DynamoDBService constructor now expects table_name, region_name, and endpoint_url
+    # These are sourced from the application settings (config.py, which loads from .env)
+    try:
+        service = DynamoDBService(
+            table_name=app_settings.dynamodb_table_name,
+            region_name=app_settings.aws_region_name,
+            endpoint_url=app_settings.dynamodb_endpoint_url
+        )
+        return service
+    except ConnectionError as e:
+        # Log this critical error, as the application cannot function without DB connection
+        print(f"CRITICAL: Failed to initialize DynamoDBService: {e}")
+        # Re-raise as HTTPException to make FastAPI return a 500 error
+        # This prevents the app from trying to operate with a non-functional service
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Could not connect to the database service: {e}"
+        )
+    except Exception as e: # Catch any other unexpected errors during service instantiation
+        print(f"CRITICAL: Unexpected error during DynamoDBService instantiation: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"An unexpected error occurred while setting up the database service: {e}"
+        )
+
 
 router = APIRouter(
     prefix="/providers",
