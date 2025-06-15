@@ -1,23 +1,25 @@
 import os
 import uuid
 from typing import List, Optional, Dict, Any
+from datetime import datetime
+from collections import defaultdict
 
 import boto3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Attr, Key
+from dataclasses import asdict
+from app.models.provider import Company, Branch, Service, Provider
+from app.models.request_models import ProviderRequest
+from app.models.response_models import ProviderDetailResponse, ProviderResponse,BranchResponse, BranchWithoutServicesResponse, CompanyResponse, CompanyNameResponse, ServiceResponse
+from app.exception import CreateProviderException, BatchWriteException, GetProviderByIdException, SearchByServiceAndCityException, ProviderNotFoundException, CompanyNotDeletedException, CompanyNotUpdateException, CompanyNotSaveException, CompanyNotDeleteOrSaveException, SaveProviderException
 
-from app.models.provider import (
-    ProviderCreate,
-    ProviderUpdate,
-    ProviderResponse,
-    ProviderNameResponse,
-    Branch,
-    BranchCreate
-)
+
 
 class DynamoDBService:
-    def __init__(self, table_name: str, region_name: Optional[str] = None, endpoint_url: Optional[str] = None):
-        self.table_name = table_name
+    def __init__(self, region_name: Optional[str] = None, endpoint_url: Optional[str] = None):
+        self.rechard_variables()
+        self.table_name = os.getenv('DYNAMODB_TABLE_NAME')
+        print("Nombre de tabla al inicializar:", self.table_name)
         self.region_name = region_name
         self.endpoint_url = endpoint_url
 
@@ -27,375 +29,638 @@ class DynamoDBService:
         if self.endpoint_url:
             dynamodb_args['endpoint_url'] = self.endpoint_url
         
-        # For local testing with dummy credentials if endpoint_url is set and no real AWS creds are configured
-        if self.endpoint_url and not (os.getenv('AWS_ACCESS_KEY_ID') and os.getenv('AWS_SECRET_ACCESS_KEY')):
-            if not os.getenv('AWS_SESSION_TOKEN'): # check if not using temp creds from IAM role
-                dynamodb_args['aws_access_key_id'] = os.getenv('AWS_ACCESS_KEY_ID', 'dummy')
-                dynamodb_args['aws_secret_access_key'] = os.getenv('AWS_SECRET_ACCESS_KEY', 'dummy')
+        # Configuración de credenciales mejorada
+        self._configure_credentials(dynamodb_args)
 
         try:
-            # print(f"Initializing DynamoDBService with table: {self.table_name}, region: {self.region_name}, endpoint: {self.endpoint_url}")
-            # print(f"Boto3 resource args: {dynamodb_args}")
+
+            print(f"Initializing DynamoDBService with table: {self.table_name}, region: {self.region_name}, endpoint: {self.endpoint_url}")
             self.dynamodb = boto3.resource('dynamodb', **dynamodb_args)
-            self.table = self.dynamodb.Table(self.table_name)
-            # Optional: Add a check to see if the table actually exists and is accessible
-            # self.table.load() 
-            # print(f"Successfully connected to table '{self.table_name}'.")
+            self.table = self.dynamodb.Table(self.table_name) # type: ignore
+            
+            # Verificar la conexión
+            self._test_connection()
+            
         except ClientError as e:
-            # print(f"Error initializing DynamoDB client or table: {e}")
-            # Depending on desired behavior, either raise the error or handle it
-            # For now, let's re-raise or raise a custom exception
+            print(f"Error de cliente DynamoDB: {e}")
             raise ConnectionError(f"Failed to connect to DynamoDB table '{self.table_name}': {e}")
-        except Exception as e: # Catch other potential errors during initialization
-            # print(f"An unexpected error occurred during DynamoDBService initialization: {e}")
+        except Exception as e:
+            print(f"Error inesperado: {e}")
             raise ConnectionError(f"Unexpected error initializing DynamoDBService: {e}")
+        
+    def rechard_variables(self):
+        """
+        Recarga las variables de entorno desde el archivo .env
+        """
+        from dotenv import load_dotenv
+        load_dotenv('.env', override=True)
+            
+    def _configure_credentials(self, dynamodb_args: Dict[str, Any]):
+        """Configura las credenciales de AWS de forma robusta"""
+        self.rechard_variables()
+        # Si es endpoint local (DynamoDB Local), usar credenciales dummy
+        if self.endpoint_url and ('localhost' in self.endpoint_url or '127.0.0.1' in self.endpoint_url):
+            print("Detected local DynamoDB endpoint, using dummy credentials")
+            dynamodb_args['aws_access_key_id'] = 'dummy'
+            dynamodb_args['aws_secret_access_key'] = 'dummy'
+            return
+        
+        # Para endpoints reales, verificar credenciales
+        access_key = os.getenv('AWS_ACCESS_KEY_ID')
+        secret_key = os.getenv('AWS_SECRET_ACCESS_KEY')
+        session_token = os.getenv('AWS_SESSION_TOKEN')
+        
+        print("AWS Credentials check:")
+        print(f"- AWS_ACCESS_KEY_ID: {'SET' if access_key else 'NOT SET'}")
+        print(f"- AWS_SECRET_ACCESS_KEY: {'SET' if secret_key else 'NOT SET'}")
+        print(f"- AWS_SESSION_TOKEN: {'SET' if session_token else 'NOT SET'}")
+        
+        # Si no hay credenciales configuradas, usar perfil default o IAM role
+        if not access_key or not secret_key:
+            print("Using default AWS credentials chain (profile, IAM role, etc.)")
+            # boto3 usará automáticamente el perfil default o IAM role
+            return
+        
+        # Si hay credenciales explícitas, usarlas
+        dynamodb_args['aws_access_key_id'] = access_key
+        dynamodb_args['aws_secret_access_key'] = secret_key
+        if session_token:
+            dynamodb_args['aws_session_token'] = session_token
 
-    def _branch_create_to_dict(self, branch_data: BranchCreate) -> Dict[str, Any]:
-        return branch_data.dict()
-
-    def _branches_create_to_list_dict(self, branches: List[BranchCreate]) -> List[Dict[str, Any]]:
-        return [self._branch_create_to_dict(branch) for branch in branches]
-
-    def _branch_to_dict(self, branch_data: Branch) -> Dict[str, Any]:
-        return branch_data.dict()
-
-    def _branches_to_list_dict(self, branches: List[Branch]) -> List[Dict[str, Any]]:
-        return [self._branch_to_dict(branch) for branch in branches]
-
-    def create_provider(self, provider_data: ProviderCreate) -> ProviderResponse:
-        provider_id = str(uuid.uuid4())
-        item_data = provider_data.dict()
-        item_data['id'] = provider_id
-        # Ensure branches are stored as list of dicts
-        item_data['branches'] = self._branches_create_to_list_dict(provider_data.branches)
-
+    def _test_connection(self):
+        """Prueba la conexión con DynamoDB"""
         try:
-            self.table.put_item(Item=item_data)
-            # For the response, we need to convert BranchCreate models within branches to Branch models
-            # In this case, Branch and BranchCreate are structurally identical for the response fields
-            response_branches = [Branch(**branch.dict()) for branch in provider_data.branches]
-            return ProviderResponse(id=provider_id, **provider_data.dict(exclude={'branches'}), branches=response_branches)
+            # Intentar describir la tabla para verificar la conexión
+            response = self.table.meta.client.describe_table(TableName=self.table_name)
+            print(f"Connection successful! Table status: {response['Table']['TableStatus']}")
         except ClientError as e:
-            print(f"Error creating provider in DynamoDB: {e}")
-            # Depending on desired error handling, you might re-raise a custom exception
-            raise
-
-    def get_provider_by_id(self, provider_id: str) -> Optional[ProviderResponse]:
-        try:
-            response = self.table.get_item(Key={'id': provider_id})
-            item = response.get('Item')
-            if item:
-                # Ensure branches from DB (list of dicts) are converted to list of Branch models
-                item['branches'] = [Branch(**branch_dict) for branch_dict in item.get('branches', [])]
-                return ProviderResponse(**item)
-            return None
-        except ClientError as e:
-            print(f"Error getting provider by ID from DynamoDB: {e}")
-            raise
-
-    def update_provider(self, provider_id: str, provider_data: ProviderUpdate) -> Optional[ProviderResponse]:
-        update_data = provider_data.dict(exclude_unset=True)
-        if not update_data:
-            # If there's nothing to update, we could return the existing provider or raise an error
-            # For now, let's return the existing provider
-            return self.get_provider_by_id(provider_id)
-
-        expression_attribute_names = {}
-        expression_attribute_values = {}
-        update_expression_parts = []
-
-        for key, value in update_data.items():
-            placeholder_key = f"#{key}"
-            placeholder_value = f":{key}"
-            expression_attribute_names[placeholder_key] = key
-            if key == "branches" and value is not None:
-                 # Convert list of BranchCreate to list of dicts for storage
-                expression_attribute_values[placeholder_value] = self._branches_create_to_list_dict(
-                    [BranchCreate(**b) for b in value] # Assuming value is list of dicts or BranchCreate models
-                )
+            error_code = e.response['Error']['Code']
+            if error_code == 'ResourceNotFoundException':
+                print(f"WARNING: Table {self.table_name} does not exist")
+                raise ConnectionError(f"Table '{self.table_name}' does not exist. Please create it before using the service.")
             else:
-                expression_attribute_values[placeholder_value] = value
-            update_expression_parts.append(f"{placeholder_key} = {placeholder_value}")
+                print(f"Connection test failed: {e}")
+                raise
 
-        update_expression = "SET " + ", ".join(update_expression_parts)
+    def _get_timestamp(self) -> str:
+        """Obtiene timestamp actual"""
+        return datetime.now().isoformat()
 
-        try:
-            response = self.table.update_item(
-                Key={'id': provider_id},
-                UpdateExpression=update_expression,
-                ExpressionAttributeNames=expression_attribute_names,
-                ExpressionAttributeValues=expression_attribute_values,
-                ReturnValues="ALL_NEW" # Gets all attributes of the item after the update
-            )
-            updated_item = response.get('Attributes')
-            if updated_item:
-                # Ensure branches from DB (list of dicts) are converted to list of Branch models
-                updated_item['branches'] = [Branch(**branch_dict) for branch_dict in updated_item.get('branches', [])]
-                return ProviderResponse(**updated_item)
-            return None # Should not happen if item exists and update is successful
-        except ClientError as e:
-            # Handle conditional check failed (e.g., item not found) if needed
-            if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
-                print(f"Provider with ID {provider_id} not found for update.")
-                return None
-            print(f"Error updating provider in DynamoDB: {e}")
-            raise
-
-    def delete_provider(self, provider_id: str) -> bool:
-        try:
-            # Check if item exists before deleting for a more informative return
-            if self.get_provider_by_id(provider_id) is None:
-                return False # Provider not found
-
-            self.table.delete_item(Key={'id': provider_id})
-            return True
-        except ClientError as e:
-            print(f"Error deleting provider from DynamoDB: {e}")
-            raise
-
-    def get_providers_by_city_and_service(self, city: str, service: str) -> List[ProviderResponse]:
-        """
-        Retrieves providers that offer a specific service and have at least one branch in the specified city.
-        Service matching is case-sensitive. City matching is case-insensitive.
-        Filtering by service is done at the DynamoDB level using Scan's FilterExpression.
-        Filtering by city is done on the client-side (Python) due to limitations with querying
-        nested objects in a list with DynamoDB Scan filters directly for case-insensitivity.
-        A GSI on 'services' (for service filtering) and potentially a composite GSI involving city
-        would be more performant in production than a full scan followed by client-side filtering.
-        """
-        all_scanned_items = []
-        # Step 1: Scan DynamoDB for providers offering the specified service.
-        scan_kwargs = {
-            'FilterExpression': Attr('services').contains(service)
-            # Consider adding ProjectionExpression if not all attributes are needed for this operation
+    def _prepare_company_item(self, company: Company, timestamp: str) -> Dict[str, Any]:
+        """Prepara el item de la empresa para DynamoDB"""
+        company.created_at = timestamp
+        company_dict = asdict(company)
+        company_dict.pop('company_id', None)        
+        return {
+            'CompanyID': f'{company.company_id}',
+            'SK': '#metadata',
+            'EntityType': 'company',
+            'created_at': timestamp,
+            **company_dict
         }
 
-        try:
-            done = False
-            start_key = None
-            while not done:
-                if start_key:
-                    scan_kwargs['ExclusiveStartKey'] = start_key
-                response = self.table.scan(**scan_kwargs)
-                all_scanned_items.extend(response.get('Items', []))
-                start_key = response.get('LastEvaluatedKey', None)
-                done = start_key is None
-        except ClientError as e:
-            print(f"Error scanning providers by service from DynamoDB: {e}")
-            raise # Or handle more gracefully
-
-        # Step 2: Client-side filtering for city (case-insensitive) and constructing response.
-        results: List[ProviderResponse] = []
-        city_lower = city.lower()
-
-        for item in all_scanned_items:
-            # The 'service' check is already handled by the Scan FilterExpression.
-            # Now, check if any branch is in the specified city.
-            has_branch_in_city = False
-            if 'branches' in item and isinstance(item['branches'], list):
-                for branch_data in item['branches']:
-                    # Ensure branch_data is a dict and has a 'city' key
-                    if isinstance(branch_data, dict) and branch_data.get('city', '').lower() == city_lower:
-                        has_branch_in_city = True
-                        break # Found a matching branch, no need to check others for this provider
-            
-            if has_branch_in_city:
-                try:
-                    # Convert branch dicts to Branch models
-                    # This is crucial for Pydantic validation and correct response structure.
-                    branch_models = [Branch(**b_data) for b_data in item.get('branches', [])]
-                    # Create a copy of item to avoid modifying the original scanned item dict directly
-                    provider_data_for_model = item.copy()
-                    provider_data_for_model['branches'] = branch_models
-                    
-                    results.append(ProviderResponse(**provider_data_for_model))
-                except Exception as e: # Catch potential Pydantic validation errors or other issues
-                    print(f"Error converting DynamoDB item to ProviderResponse for item ID {item.get('id')}: {e}")
-                    # Decide if you want to skip this item or raise an error
-                    continue 
+    def _prepare_branch_and_services_items(self, company_id: str,company_name: str, branches: List[Branch]) -> List[Dict[str, Any]]:
+        """Prepara los items de las sucursales para DynamoDB"""
+        branch_and_services_items = []
         
-        return results
+        for branch in branches:
+            branch_services = branch.services if hasattr(branch, 'services') else []
+            branch_dict = asdict(branch)
+            branch_dict.pop('services', None)
+            city = branch.city.lower()
+            for service in branch_services:
+                service_key = service.service_name.lower().replace(" ", "_")
 
-    def get_provider_name_by_id(self, provider_id: str) -> Optional[ProviderNameResponse]:
+                item = {
+                    'CompanyID': f'{company_id}',
+                    'SK': f'city#{branch.city}#{branch.branch_name}#service#{service_key}',  
+                    'EntityType': 'branch-service',
+                    'GSI1PK': f'service#{service_key}#city#{city}',
+                    'company_name': f'{company_name}',
+                    **branch_dict,
+                    **asdict(service)
+                }
+                branch_and_services_items.append(item)
+        
+        return branch_and_services_items
+
+
+    def create_provider(self, provider: Provider) -> str:
+        """
+        Create  provider complete (company + branches + services) of transactional form
+        """
         try:
-            response = self.table.get_item(
-                Key={'id': provider_id},
-                ProjectionExpression="#id_alias, #name_alias", # Use aliases for attribute names
-                ExpressionAttributeNames={
-                    "#id_alias": "id", # 'id' is generally safe but good practice
-                    "#name_alias": "name" # 'name' can be a reserved keyword
+            timestamp = self._get_timestamp()
+            company = provider.company
+            branches = provider.branches
+            errors = self._validate_provider_data(provider)
+            if errors:
+                raise ValueError(f"Errores de validación: {', '.join(errors)}")
+            
+            self._save_provider(company, branches, timestamp)
+
+            return f"Proveedor con id {company.company_id} creado exitosamente"
+
+        except Exception as e:
+            print(f"Error creando proveedor: {e}")
+            raise CreateProviderException(f"Error creando proveedor: {e}")
+
+    def _execute_batch_write(self, items: List[Dict[str, Any]]) -> None:
+        """
+        Ejecuta escritura en lotes de los items a DynamoDB
+        DynamoDB permite máximo 25 items por batch
+        """
+        batch_size = 25
+        
+        for i in range(0, len(items), batch_size):
+            batch = items[i:i + batch_size]
+            
+            # Preparar el batch request
+            request_items = {
+                self.table_name: [
+                    {'PutRequest': {'Item': item}} for item in batch
+                ]
+            }
+            
+            try:
+                response = self.table.meta.client.batch_write_item(RequestItems=request_items)
+                
+                # Manejar items no procesados (si los hay)
+                unprocessed = response.get('UnprocessedItems', {})
+                while unprocessed:
+                    print(f"Reintentando {len(unprocessed.get(self.table_name, []))} items no procesados...")
+                    response = self.table.meta.client.batch_write_item(RequestItems=unprocessed)
+                    unprocessed = response.get('UnprocessedItems', {})
+                    
+            except Exception as e:
+                print(f"Error en batch write: {e}")
+                raise BatchWriteException(f"Error escribiendo lote de datos: {e}")
+
+    # ==================== MÉTODOS DE CONSULTA MEJORADOS ====================
+    
+    def get_provider_by_id(self, company_id: str) -> Optional[ProviderDetailResponse]:
+        """
+        Obtiene un proveedor completo con toda su información
+        """
+        try:
+            response = self.table.query(
+                KeyConditionExpression=Key('CompanyID').eq(company_id)
+            )
+            
+            items = response.get('Items', [])
+            if not items:
+                raise ProviderNotFoundException(f"No se encontró el proveedor con ID: {company_id}")
+            print(f"provider found:'{items}")
+            # Separar items por tipo
+            branches_data = []
+            branch_processed = set()
+            services: defaultdict[str, List[ServiceResponse]] = defaultdict(list)
+            company = None  
+            
+            for item in items:
+                if item['SK'] == '#metadata':
+                    print(f"company found:'{item}")
+                    company = CompanyResponse(
+                        company_id=item['CompanyID'],
+                        company_name=item['company_name'],
+                        email=item['email'],
+                        phone=item['phone'],
+                        created_at=item.get('created_at'),
+                        address=item['address']
+                    )
+                else:
+                    if item['branch_name'] not in branch_processed:
+                        print(f"branch found:'{item}")
+                        branch={
+                            'branch_name': item['branch_name'],
+                            'city': item['city'],
+                            'address': item['address'],
+                            'phone': item['phone'],
+                            'manager': item.get('manager'),
+                            'services': []
+                        }
+                        branches_data.append(BranchResponse(**branch))
+                        branch_processed.add(item['branch_name'])
+                    print(f"service found:'{item}")
+                    service = {
+                        'service_name': item['service_name'],
+                        'price': item['price']
+                    }
+                    services[item['branch_name']].append(ServiceResponse(**service))
+            for branch in branches_data:
+                    branch.services = services[branch.branch_name]
+            
+            if company is None:
+                raise ProviderNotFoundException("No se encontró información de la empresa para el proveedor solicitado.")
+            
+            return ProviderDetailResponse(
+                company=company,
+                branches=branches_data
+            )
+            
+        except Exception as e:
+            if isinstance(e, ProviderNotFoundException):
+                raise e
+            print(f"Error obteniendo proveedor: {e}")
+            raise GetProviderByIdException(f"Error obteniendo proveedor: {e}")
+
+    
+
+    # ==================== MÉTODOS DE BÚSQUEDA ====================
+    
+    def search_providers_by_service_and_city(self, service_name: str, city: str) -> List[ProviderResponse ]:
+        """
+        Busca proveedores que ofrecen un servicio específico en una ciudad específica
+        """
+        service_key = service_name.lower().replace(" ", "_")
+        city_key = city.lower()
+        
+        try:
+            response = self.table.query(
+                IndexName='ServiceCityLookup',
+                KeyConditionExpression='GSI1PK = :gsi1pk',
+                ExpressionAttributeValues={
+                    ':gsi1pk': f'service#{service_key}#city#{city_key}'
                 }
             )
-            item = response.get('Item')
-            if item:
-                # Map aliased keys back to model field names if necessary,
-                # but Pydantic should map them if the model fields are 'id' and 'name'
-                return ProviderNameResponse(id=item.get('id'), name=item.get('name'))
-            return None
-        except ClientError as e:
-            print(f"Error getting provider name by ID from DynamoDB: {e}")
-            raise
+            
+            print(f"the response is: {response}")
+            providers: defaultdict[str, List[BranchWithoutServicesResponse]] = defaultdict(list)
+            for item in response.get('Items', []):
+                print(f"the item is: {item}")
+                branch = {
+                    'branch_name': item['branch_name'],
+                    'address': item['address'],
+                    'phone': item['phone'],
+                    'manager': item.get('manager')
+                }
+                print(f"branch found: {branch}")
+                providers[item['company_name']].append(BranchWithoutServicesResponse(**branch))
+                print(f"providers: {providers}")
+            providers_response = [
+                ProviderResponse(
+                    company=CompanyNameResponse(name=company_name),
+                    branches=branches_list
+                )
+                for company_name, branches_list in providers.items()
+                ]
+            return providers_response
+            
+        except Exception as e:
+            raise SearchByServiceAndCityException(f"Error buscando proveedores: {e}")
 
-# Example usage (for testing locally, not part of the service class itself)
-if __name__ == '__main__':
-    # Configure for local DynamoDB (ensure DynamoDB local is running)
-    local_table_name = "providers-local-filtering-test"
-    local_region_name = "localhost" 
-    local_endpoint_url = "http://localhost:8000"
-
-    # Create table if it doesn't exist
-    try:
-        ddb_resource_for_test = boto3.resource(
-            'dynamodb',
-            endpoint_url=local_endpoint_url,
-            region_name=local_region_name,
-            aws_access_key_id='dummy',
-            aws_secret_access_key='dummy'
-        )
-        # Delete table if it exists, to ensure clean state for tests
+    # ==================== MÉTODOS DE ACTUALIZACIÓN ====================
+    
+    def update_company_provider(self, company_id: str, updated_company: Company) -> str:
+        """
+        Actualiza un proveedor completo (reemplaza toda la información)
+        """
         try:
-            table_to_delete = ddb_resource_for_test.Table(local_table_name)
-            table_to_delete.delete()
-            print(f"Waiting for table {local_table_name} to be deleted...")
-            table_to_delete.wait_until_not_exists()
-            print(f"Table {local_table_name} deleted.")
-        except ClientError as ce:
-            if ce.response['Error']['Code'] != 'ResourceNotFoundException':
-                print(f"Error deleting existing table {local_table_name}: {ce}")
-                # raise # Optional: re-raise if this is critical
+            company=self.get_company(company_id, '#metadata')
+            
+            if not company:
+                raise ProviderNotFoundException(f"Proveedor con ID {company_id} no encontrado")
+            updated_company.created_at = company.created_at if updated_company.created_at else self._get_timestamp()
+            if updated_company.company_name == company.company_name and updated_company.company_id == company.company_id :
+                print(f"Actualizando solo la empresa con ID {company_id}")
+                return self._update_only_company(updated_company.company_id, updated_company,company,'#metadata',0)
+            else:
+                print(f"Actualizando proveedor con ID {company_id}")
+                return self._update_company_and_branches(updated_company.company_id, updated_company, company)
+            
+            
+        except Exception as e:
+            raise Exception(f"Error actualizando proveedor: {e}")
 
-        ddb_resource_for_test.create_table(
-            TableName=local_table_name,
-            KeySchema=[{'AttributeName': 'id', 'KeyType': 'HASH'}],
-            AttributeDefinitions=[{'AttributeName': 'id', 'AttributeType': 'S'}],
-            ProvisionedThroughput={'ReadCapacityUnits': 5, 'WriteCapacityUnits': 5}
-        )
-        print(f"Table {local_table_name} creation initiated.")
-        ddb_resource_for_test.meta.client.get_waiter('table_exists').wait(TableName=local_table_name)
-        print(f"Table {local_table_name} created/confirmed existing.")
-    except ClientError as e:
-        if e.response['Error']['Code'] == 'ResourceInUseException':
-            print(f"Table {local_table_name} already exists (from a parallel creation perhaps, or delete failed).")
+    def delete_provider(self, company_id: str) -> bool:
+        """
+        Elimina un proveedor completo y todos sus datos relacionados
+        """
+        try:
+            # Obtener todos los elementos del proveedor
+            response = self.table.query(
+                KeyConditionExpression=Key('CompanyID').eq(company_id)
+            )
+            
+            items = response.get('Items', [])
+            if not items:
+                return False
+            
+            # Eliminar en lotes
+            delete_requests = []
+            for item in items:
+                delete_requests.append({
+                    'DeleteRequest': {
+                        'Key': {'CompanyID': item['CompanyID'], 'SK': item['SK']}
+                    }
+                })
+            
+            # Procesar en lotes de 25
+            batch_size = 25
+            for i in range(0, len(delete_requests), batch_size):
+                batch = delete_requests[i:i + batch_size]
+                request_items = {self.table_name: batch}
+                
+                response = self.table.meta.client.batch_write_item(RequestItems=request_items)
+                
+                # Manejar items no procesados
+                unprocessed = response.get('UnprocessedItems', {})
+                while unprocessed:
+                    response = self.table.meta.client.batch_write_item(RequestItems=unprocessed)
+                    unprocessed = response.get('UnprocessedItems', {})
+            
+            print(f"Proveedor {company_id} eliminado exitosamente")
+            return True
+            
+        except ClientError as e:
+            raise Exception(f"Error eliminando proveedor: {e}")
+
+    # ==================== MÉTODOS DE UTILIDAD ====================
+    
+    def _validate_provider_data(self, provider: Provider) -> List[str]:
+        """
+        Validate provider data before saving and return a list of errors
+        If no errors, return an empty list
+        """
+        errors = []
+        
+        errors.extend(self._validate_company_data(provider.company))
+        
+        
+        return errors
+    def _validate_company_data(self, company: Company) -> List[str]:
+        """
+        Validate company data before saving and return a list of errors
+        If no errors, return an empty list
+        """
+        errors = []
+        
+        if not company.company_id:
+            errors.append("CompanyID es requerido")
+        if not company.company_name:
+            errors.append("Nombre de la empresa es requerido")
+        if not company.email:
+            errors.append("Email es requerido")
+        if not company.phone:
+            errors.append("Teléfono es requerido")
+        if not company.address:
+            errors.append("Dirección es requerida")
+        
+        return errors
+    def _validate_branch_data(self, branches: List[Branch]) -> List[str]:
+        """
+        Validate branch data before saving and return a list of errors
+        If no errors, return an empty list
+        """
+        if not branches:
+            return ["Al menos una sucursal es requerida"]
+        
+        errors = []
+        for i, branch in enumerate(branches):
+            branch_errors = self._validate_single_branch(branch, i + 1)
+            errors.extend(branch_errors)
+        
+        return errors
+
+    def _validate_single_branch(self, branch: Branch, branch_number: int) -> List[str]:
+        """
+        Validate a single branch and return list of errors
+        """
+        errors = []
+        
+        # Validate required fields
+        errors.extend(self._validate_required_fields(branch, branch_number))
+        
+        # Validate manager field
+        errors.extend(self._validate_manager_field(branch, branch_number))
+        
+        # Validate services
+        errors.extend(self._validate_branch_services(branch, branch_number))
+        
+        return errors
+
+    def _validate_required_fields(self, branch: Branch, branch_number: int) -> List[str]:
+        """
+        Validate required fields for a branch
+        """
+        errors = []
+        required_fields = {
+            'city': 'Ciudad',
+            'address': 'Dirección', 
+            'phone': 'Teléfono',
+            'branch_name': 'Nombre de sucursal'
+        }
+        
+        for field, field_name in required_fields.items():
+            if not getattr(branch, field, None):
+                errors.append(f"{field_name} es requerida para sucursal {branch_number}")
+        
+        return errors
+
+    def _validate_manager_field(self, branch: Branch, branch_number: int) -> List[str]:
+        """
+        Validate manager field for a branch
+        """
+        if branch.manager and not isinstance(branch.manager, str):
+            return [f"Manager debe ser un string para sucursal {branch_number}"]
+        return []
+
+    def _validate_branch_services(self, branch: Branch, branch_number: int) -> List[str]:
+        """
+        Validate services for a branch
+        """
+        errors = []
+        
+        if not hasattr(branch, 'services') or not branch.services:
+            errors.append(f"Al menos un servicio es requerido para sucursal {branch_number}")
         else:
-            print(f"Error during table setup for test: {e}")
-            exit(1)
+            errors.extend(self._validate_service_data(branch.services))
+        
+        return errors
+    def _validate_service_data(self, services: List[Service]) -> List[str]:
+        """
+        Validate service data before saving and return a list of errors
+        If no errors, return an empty list
+        """
+        errors = []
 
-    service = DynamoDBService(
-        table_name=local_table_name,
-        region_name=local_region_name,
-        endpoint_url=local_endpoint_url
-    )
-    print(f"DynamoDBService instantiated for table: {service.table_name}")
-
-    # Test Data
-    providers_data = [
-        ProviderCreate(
-            name="Cloud Pros",
-            email="contact@cloudpros.com", address="100 Main St, CloudCity, USA", phone="555-0100",
-            services=["Cloud Migration", "Cloud Security", "Consulting"],
-            branches=[
-                BranchCreate(name="CP North", address="1 N Cloud Ave", city="CloudCity", phone="555-0101", manager_name="Abe N", email="abe@cp.com"),
-                BranchCreate(name="CP Metro", address="50 Urban Rd", city="Metroville", phone="555-0102", manager_name="Bea M", email="bea@cp.com")
-            ]),
-        ProviderCreate(
-            name="Data Gurus",
-            email="info@datagurus.com", address="200 Data Dr, DataTown, USA", phone="555-0200",
-            services=["Data Analytics", "Consulting", "AI Solutions"],
-            branches=[
-                BranchCreate(name="DG Central", address="10 Central Plaza", city="Metroville", phone="555-0201", manager_name="Cid C", email="cid@dg.com"),
-                BranchCreate(name="DG West", address="25 West End", city="Metroville", phone="555-0202", manager_name="Deb W", email="deb@dg.com"),
-                BranchCreate(name="DG Oldtown", address="5 Old Mill Rd", city="Oldtown", phone="555-0203", manager_name="Ed O", email="ed@dg.com")
-            ]),
-        ProviderCreate(
-            name="Security Experts Inc.",
-            email="secure@secexp.com", address="300 Secure Blvd, SecureCity, USA", phone="555-0300",
-            services=["Cloud Security", "Network Security"],
-            branches=[
-                BranchCreate(name="SE Downtown", address="1 Secure Sq", city="Metroville", phone="555-0301", manager_name="Fae D", email="fae@se.com"),
-                BranchCreate(name="SE CloudWatch", address="90 Cloud Ave", city="CloudCity", phone="555-0302", manager_name="Gil C", email="gil@se.com")
-            ]),
-        ProviderCreate(
-            name="Consultants Collective",
-            email="contact@cc.com", address="400 Consult Cir, ThinkTank, USA", phone="555-0400",
-            services=["Consulting"], # Only consulting
-            branches=[
-                BranchCreate(name="CC Metro", address="77 Consult St", city="Metroville", phone="555-0401", manager_name="Hal M", email="hal@cc.com")
-            ])
-    ]
-    provider_ids = {}
-    print("\n--- Creating Test Providers ---")
-    for pd in providers_data:
-        created = service.create_provider(pd)
-        provider_ids[created.name] = created.id
-        print(f"Created: {created.name} (ID: {created.id})")
-
-    # Test Scenarios for get_providers_by_city_and_service
-    print("\n--- Testing Get Providers by City and Service ---")
-
-    # Scenario 1: City "Metroville", Service "Consulting"
-    # Expected: Cloud Pros, Data Gurus, Consultants Collective
-    results1 = service.get_providers_by_city_and_service(city="Metroville", service="Consulting")
-    names1 = sorted([p.name for p in results1])
-    print(f"Metroville/Consulting: {names1}")
-    assert names1 == sorted(["Cloud Pros", "Data Gurus", "Consultants Collective"]), f"FAIL Scenario 1: Expected Cloud Pros, Data Gurus, CC. Got {names1}"
-    print("PASS: Metroville/Consulting")
-
-    # Scenario 2: City "CloudCity", Service "Cloud Security"
-    # Expected: Cloud Pros, Security Experts Inc.
-    results2 = service.get_providers_by_city_and_service(city="CloudCity", service="Cloud Security")
-    names2 = sorted([p.name for p in results2])
-    print(f"CloudCity/Cloud Security: {names2}")
-    assert names2 == sorted(["Cloud Pros", "Security Experts Inc."]), f"FAIL Scenario 2: Expected Cloud Pros, SE Inc. Got {names2}"
-    print("PASS: CloudCity/Cloud Security")
-
-    # Scenario 3: City "Oldtown", Service "AI Solutions"
-    # Expected: Data Gurus
-    results3 = service.get_providers_by_city_and_service(city="Oldtown", service="AI Solutions")
-    names3 = sorted([p.name for p in results3])
-    print(f"Oldtown/AI Solutions: {names3}")
-    assert names3 == ["Data Gurus"], f"FAIL Scenario 3: Expected Data Gurus. Got {names3}"
-    print("PASS: Oldtown/AI Solutions")
-    
-    # Scenario 4: City "Metroville", Service "Data Analytics" (case sensitive service check)
-    # Expected: Data Gurus
-    results4 = service.get_providers_by_city_and_service(city="metroville", service="Data Analytics") # city case-insensitive
-    names4 = sorted([p.name for p in results4])
-    print(f"metroville/Data Analytics: {names4}")
-    assert names4 == ["Data Gurus"], f"FAIL Scenario 4: Expected Data Gurus. Got {names4}"
-    print("PASS: metroville/Data Analytics (case-insensitive city)")
-
-    # Scenario 5: City "NonExistentCity", Service "Consulting"
-    # Expected: []
-    results5 = service.get_providers_by_city_and_service(city="NonExistentCity", service="Consulting")
-    names5 = sorted([p.name for p in results5])
-    print(f"NonExistentCity/Consulting: {names5}")
-    assert names5 == [], f"FAIL Scenario 5: Expected []. Got {names5}"
-    print("PASS: NonExistentCity/Consulting")
-
-    # Scenario 6: City "Metroville", Service "NonExistentService"
-    # Expected: []
-    results6 = service.get_providers_by_city_and_service(city="Metroville", service="NonExistentService")
-    names6 = sorted([p.name for p in results6])
-    print(f"Metroville/NonExistentService: {names6}")
-    assert names6 == [], f"FAIL Scenario 6: Expected []. Got {names6}"
-    print("PASS: Metroville/NonExistentService")
-    
-    # Scenario 7: Service offered by provider, but no branch in that city
-    # Cloud Pros offers "Cloud Migration", but not in "Oldtown"
-    results7 = service.get_providers_by_city_and_service(city="Oldtown", service="Cloud Migration")
-    names7 = sorted([p.name for p in results7])
-    print(f"Oldtown/Cloud Migration: {names7}")
-    assert names7 == [], f"FAIL Scenario 7: Expected []. Got {names7}"
-    print("PASS: Oldtown/Cloud Migration (service exists, but not in city)")
-
-    print("\n--- All get_providers_by_city_and_service tests passed! ---")
-
-    # Clean up: Delete all created test providers
-    print("\n--- Cleaning up test providers ---")
-    for name, provider_id in provider_ids.items():
-        if service.delete_provider(provider_id):
-            print(f"Deleted provider: {name} (ID: {provider_id})")
+        if not services:
+            errors.append("Al menos un servicio es requerido")
         else:
-            print(f"Failed to delete provider: {name} (ID: {provider_id})")
+            for i, service in enumerate(services):
+                if not service.service_name:
+                    errors.append(f"Nombre de servicio es requerido para servicio {i+1}")
+                if not service.price:
+                    errors.append(f"Precio es requerido para servicio {i+1}")
+                if not isinstance(service.price, (int, float)):
+                    errors.append(f"Precio debe ser un número para servicio {i+1}")
+
+        return errors
+
+    def _save_provider(self, company: Company, branches: List[Branch], timestamp: str) -> None:
+            try:
+                print(f"Proceso de guardando proveedor: {company.company_name}")
+                # Prepare all items to write
+                all_items = []
+
+                # 1. Prepare company item 
+                company_item = self._prepare_company_item(company, timestamp)
+                all_items.append(company_item)
+
+                # 2. Prepare branch items 
+                branch_items = self._prepare_branch_and_services_items(company.company_id,company.company_name, branches)
+                all_items.extend(branch_items)
+
+                # 3. Execute transaction to create all items
+                self._execute_batch_write(all_items)
+            except Exception as e:
+                print(f"Error guardando proveedor: {e}")
+                raise SaveProviderException(f"Error guardando proveedor: {e}")
+    def get_company(self, company_id: str, sk: str) -> Optional[Company]:
+        """
+        Obtiene un registro específico por CompanyID (PK) y SK
+        """
+        try:
+            print(f"Obteniendo empresa con CompanyID: {company_id} y SK: {sk}")
+            response = self.table.get_item(
+                Key={
+                    'CompanyID': company_id,
+                    'SK': sk
+                }
+            )
+            
+            return Company(
+                company_id=company_id,
+                company_name=response['Item']['company_name'],
+                email=response['Item']['email'],
+                phone=response['Item']['phone'],
+                created_at=response['Item'].get('created_at'),
+                address=response['Item']['address']
+            )
+            
+        except ClientError as e:
+            print(f"Error obteniendo registro por PK y SK: {e}")
+            raise Exception(f"Error obteniendo registro por PK y SK: {e}")
+   
     
-    print("\nLocal tests for DynamoDBService completed.")
+    
+    def delete_company(self, company_id: str, sk: str) -> bool:
+        """
+        Elimina un registro específico por CompanyID (PK) y SK
+        """
+        try:
+            response = self.table.delete_item(
+                Key={
+                    'CompanyID': company_id,
+                    'SK': sk
+                },
+                ReturnValues='ALL_OLD'
+            )
+            
+            # Verificar si se eliminó algo
+            return 'Attributes' in response
+            
+        except ClientError as e:
+            print(f"Error eliminando registro: {e}")
+            raise Exception(f"Error eliminando registro: {e}")
+        
+    def _update_only_company(self, company_id: str, updated_company: Company, old_company: Company, sk: str, retry:int) -> str:
+        """
+        Actualiza solo la información de la empresa (sin eliminar sucursales ni servicios)
+        """
+        try:
+            process_update = self._delete_and_save_company(company_id, updated_company, sk)
+            while process_update is False and retry < 3:
+                print(f"Intentando eliminar proveedor {company_id} (intento {retry})")
+                process_update = self._delete_and_save_company(company_id, updated_company, sk)
+                retry += 1
+            if process_update:
+                return f"Proveedor con id {company_id} actualizado exitosamente"
+            else:
+                raise CompanyNotDeletedException(f"Proveedor con ID {company_id} no pudo ser eliminado")
+        except Exception as e:
+            if isinstance(e, CompanyNotDeletedException) or isinstance(e, CompanyNotSaveException) or isinstance(e, CompanyNotDeleteOrSaveException):   
+                raise e
+            else:
+                print(f"Error actualizando proveedor: {e}")
+                raise CompanyNotUpdateException(f"Error : {e}")
+            
+    def _delete_and_save_company(self, company_id: str, updated_company: Company, sk: str) -> bool:
+        """
+        Delete old company and save the updated company
+        """
+        try:
+            try:
+                delete_company = self.delete_company(company_id, sk)
+            except Exception as e:
+                print(f"Error eliminando proveedor: {e}")
+                raise CompanyNotDeletedException(f"Error : {e}")
+            if delete_company:
+                company_save = self._prepare_company_item(updated_company, updated_company.created_at if updated_company.created_at is not None else self._get_timestamp())
+                try:
+                    self.table.put_item(Item=company_save)
+                    return True
+                except Exception as e:
+                    print(f"Error guardando proveedor: {e}")
+                    raise CompanyNotSaveException(f"Error : {e}")
+            else:
+                return False
+        except Exception as e:
+            if isinstance(e, CompanyNotDeletedException ) or isinstance(e, CompanyNotSaveException):
+                raise e
+            else:
+                print(f"Error: {e}")
+                raise CompanyNotDeleteOrSaveException(f"Error : {e}")
+    def _update_company_and_branches(self, company_id: str, updated_company: Company, old_company: Company) -> str:
+        """
+        Update data of company and branches becouse company_id or company_name is not the same
+        """
+        try:
+            provider= self.table.query(
+                KeyConditionExpression=Key('CompanyID').eq(company_id)
+            )
+            if not provider:
+                raise ProviderNotFoundException(f"Proveedor con ID {company_id} no encontrado")
+            attempts = 0
+            while attempts < 3:
+                delete_provider = self.delete_provider(company_id)
+                if delete_provider:
+                    attempts_save = 0
+                    while attempts_save < 3:
+                        print("provider eliminado, guardando proveedor actualizado")
+                        print(f"provider eliminado: {provider}" )
+                        save_provider_process = self._save_provider_update(updated_company, old_company, provider)
+                        if isinstance(save_provider_process, str):
+                            return save_provider_process
+                        attempts_save += 1
+                    raise CompanyNotSaveException(f"Proveedor con ID {company_id} no pudo ser guardado")
+                attempts += 1
+                print(f"retrying to save provider {company_id} (attempt {attempts})")
+            raise CompanyNotDeletedException(f"Proveedor con ID {company_id} no pudo ser eliminado")
+        except Exception as e:
+            if isinstance(e, CompanyNotDeletedException) or isinstance(e, CompanyNotSaveException) or isinstance(e, CompanyNotDeleteOrSaveException):
+                raise e
+            else:
+                print(f"Error actualizando proveedor: {e}")
+                raise CompanyNotUpdateException(f"Error : {e}")
+    
+    def _save_provider_update(self, updated_company: Company, old_company: Company, provider: Provider) -> str|bool:
+        """
+        Save provider update
+        """
+        
+        print(f"ingresando al metodo _save_provider_update")
+        try:
+            if not provider.branches:
+                print(f"No se encontraron sucursales para el proveedor con ID {updated_company.company_id}")
+            
+            print(f"guardando proveedor actualizado: {updated_company} y sus sucursales: {provider.branches}")
+            self._save_provider(updated_company, provider.branches, old_company.created_at if old_company.created_at is not None else self._get_timestamp())
+            company_saved=self.get_company(updated_company.company_id, '#metadata')
+            if company_saved:
+                return f"Proveedor con id {updated_company.company_id} actualizado exitosamente"
+            else:
+                return False
+        except Exception as e:
+            print(f"Error guardando proveedor actualizado: {e}")
+            raise SaveProviderException(f"Error guardando proveedor: {e}")

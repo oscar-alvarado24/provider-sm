@@ -1,119 +1,186 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import List
-from app.models.provider import (
-    ProviderCreate,
-    ProviderUpdate,
-    ProviderResponse,
-    ProviderNameResponse,
-    ProviderFilterQueryParams
-)
+from app.models.provider import Provider, Company, Branch, Service
+from app.models.request_models import ProviderRequest, CompanyRequest, BranchRequest, ServiceRequest
+from app.models.response_models import ProviderResponse, ProviderDetailResponse
 from app.services.dynamodb_service import DynamoDBService
-from app.config import settings as app_settings # Renamed to avoid conflict
+from app.config import settings as app_settings
 
-# Dependency to get DynamoDB service
-# This helps in managing the lifecycle of the service if needed,
-# and makes it easier to mock for testing.
 def get_db_service():
-    # The DynamoDBService constructor now expects table_name, region_name, and endpoint_url
-    # These are sourced from the application settings (config.py, which loads from .env)
+    """Dependency to get DynamoDB service"""
     try:
         service = DynamoDBService(
-            table_name=app_settings.dynamodb_table_name,
             region_name=app_settings.aws_region_name,
             endpoint_url=app_settings.dynamodb_endpoint_url
         )
         return service
     except ConnectionError as e:
-        # Log this critical error, as the application cannot function without DB connection
         print(f"CRITICAL: Failed to initialize DynamoDBService: {e}")
-        # Re-raise as HTTPException to make FastAPI return a 500 error
-        # This prevents the app from trying to operate with a non-functional service
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Could not connect to the database service: {e}"
         )
-    except Exception as e: # Catch any other unexpected errors during service instantiation
+    except Exception as e:
         print(f"CRITICAL: Unexpected error during DynamoDBService instantiation: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An unexpected error occurred while setting up the database service: {e}"
         )
 
+def convert_request_to_provider(provider_request: ProviderRequest) -> Provider:
+    """Convierte SupplierRequest a Provider usando el company_id del objeto company"""
+    
+    # Create Company with company_id from request
+    company = create_company(provider_request.company)
+    # Create Branches with services
+    branches = []
 
+    for branch_request in provider_request.branches:
+        branch = create_branch(branch_request)
+        branches.append(branch)    
+    
+    return Provider(
+        company=company,
+        branches=branches
+    )
+
+def create_company(company_request: CompanyRequest) -> Company:
+    """Create Company from CompanyRequest"""
+    return Company(
+        company_id=company_request.company_id,
+        company_name=company_request.company_name,
+        email=company_request.email,
+        phone=company_request.phone,
+        address=company_request.address
+    )
+def create_branch(branch_request: BranchRequest) -> Branch:
+    """Create Branch from BranchRequest"""
+    branch_services = []
+    for service_request in branch_request.services:
+        branch_services.append(create_service(service_request))
+    return Branch(
+        branch_name=branch_request.branch_name,
+        city=branch_request.city,
+        address=branch_request.address,
+        phone=branch_request.phone,
+        manager=branch_request.manager,
+        services=branch_services
+    )
+def create_service(service_request: ServiceRequest) -> Service:
+        """Create Service from ServiceRequest"""
+        return Service(
+            service_name=service_request.service_name,
+            price=service_request.price
+        )
 router = APIRouter(
     prefix="/providers",
     tags=["Providers"],
     responses={404: {"description": "Not found"}},
 )
 
-@router.post("/", response_model=ProviderResponse, status_code=status.HTTP_201_CREATED, summary="Create new provider")
-async def create_provider_endpoint(provider: ProviderCreate, db_service: DynamoDBService = Depends(get_db_service)):
+@router.post("/", response_model=str, status_code=status.HTTP_201_CREATED, 
+             summary="Create new provider")
+async def create_provider_endpoint(
+    provider_request: ProviderRequest, 
+    db_service: DynamoDBService = Depends(get_db_service)
+):
+    """
+    Create a new provider with the given details.
+    """
     try:
+    # Convertir request a modelo interno
+        provider = convert_request_to_provider(provider_request)
+        
+        # Crear el proveedor
         created_provider = db_service.create_provider(provider)
         return created_provider
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"Error creating provider {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
 
-
-@router.get("/{provider_id}", response_model=ProviderResponse, summary="Get provider by ID")
-async def get_provider_endpoint(provider_id: str, db_service: DynamoDBService = Depends(get_db_service)):
+@router.get("/{company_id}", response_model=ProviderDetailResponse, 
+            summary="Get provider by ID")
+async def get_provider_endpoint(
+    company_id: str,
+    db_service: DynamoDBService = Depends(get_db_service)
+):
+    """Get provider by company ID"""
     try:
-        provider = db_service.get_provider_by_id(provider_id)
-        if not provider:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
-        return provider
+        return db_service.get_provider_by_id(company_id)
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"Error get provider {company_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
 
-@router.put("/{provider_id}", response_model=ProviderResponse, summary="Update existing provider")
-async def update_provider_endpoint(provider_id: str, provider_update: ProviderUpdate, db_service: DynamoDBService = Depends(get_db_service)):
+
+@router.put("/{company_id}", response_model=str, 
+            summary="Update provider")
+async def update_provider_endpoint(
+    company_id: str,
+    company_request: CompanyRequest,
+    db_service: DynamoDBService = Depends(get_db_service)
+):
+    """Actualiza un proveedor completo"""
     try:
-        updated_provider = db_service.update_provider(provider_id, provider_update)
-        if not updated_provider:
-            # This also handles the case where the provider_id doesn't exist and update_provider returns None
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found or update failed")
+        company= create_company(company_request)
+        print(f"Updating provider with ID {company_id} with data: {company}")
+        updated_provider = db_service.update_company_provider(company_id, company)
         return updated_provider
-    except ValueError as ve: # Catch validation errors from Pydantic models if any slip through or are raised in service
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ve))
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"Error get provider {company_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
 
-
-@router.delete("/{provider_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete provider by ID")
-async def delete_provider_endpoint(provider_id: str, db_service: DynamoDBService = Depends(get_db_service)):
+@router.delete("/{company_id}", status_code=status.HTTP_204_NO_CONTENT,
+               summary="Delete provider")
+async def delete_provider_endpoint(
+    company_id: str,
+    db_service: DynamoDBService = Depends(get_db_service)
+):
+    """Elimina un proveedor y todos sus datos relacionados"""
     try:
-        success = db_service.delete_provider(provider_id)
+        success = db_service.delete_provider(company_id)
         if not success:
-            # This means the provider was not found to be deleted.
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
-        # For 204 No Content, FastAPI expects no return value (or None)
-        return None
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Proveedor con ID {company_id} no encontrado"
+            )
+    except HTTPException:
+        raise
     except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"Error deleting provider {company_id}: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
 
-
-@router.get("/", response_model=List[ProviderResponse], summary="Filter providers by city and service")
-async def filter_providers_endpoint(params: ProviderFilterQueryParams = Depends(), db_service: DynamoDBService = Depends(get_db_service)):
-    # The ProviderFilterQueryParams model will ensure 'city' and 'service' are provided due to Field(...)
+@router.get("/search/service-city", response_model=List[ProviderResponse ],
+            summary="Search providers by service and city")
+async def search_providers_endpoint(
+    service_name: str,
+    city: str,
+    db_service: DynamoDBService = Depends(get_db_service)
+):
+    """Busca proveedores que ofrecen un servicio específico en una ciudad"""
     try:
-        providers = db_service.get_providers_by_city_and_service(city=params.city, service=params.service)
+        providers = db_service.search_providers_by_service_and_city(service_name, city)
         return providers
     except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
-
-
-@router.get("/{provider_id}/name", response_model=ProviderNameResponse, summary="Get provider name by ID")
-async def get_provider_name_endpoint(provider_id: str, db_service: DynamoDBService = Depends(get_db_service)):
-    try:
-        provider_name_info = db_service.get_provider_name_by_id(provider_id)
-        if not provider_name_info:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Provider not found")
-        return provider_name_info
-    except Exception as e:
-        # Log the exception e
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=str(e))
+        print(f"Error searching providers: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
