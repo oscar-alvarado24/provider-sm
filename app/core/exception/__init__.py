@@ -8,5 +8,6 @@ from .CompanyNotUpdateException import CompanyNotUpdateException
 from .CompanyNotSaveException import CompanyNotSaveException
 from .CompanyNotDeleteOrSaveException import CompanyNotDeleteOrSaveException
 from .SaveProviderException import SaveProviderException
-
-__all__ = ['CreateProviderException', 'BatchWriteException', 'GetProviderByIdException', 'SearchByServiceAndCityException','ProviderNotFoundException', 'CompanyNotDeletedException', 'CompanyNotUpdateException', 'CompanyNotSaveException', 'CompanyNotDeleteOrSaveException', 'SaveProviderException']
+from .CreateObjectProviderException import CreateObjectProviderException
+from .GetCompanyException import GetCompanyException
+__all__ = ['CreateProviderException', 'BatchWriteException', 'GetProviderByIdException', 'SearchByServiceAndCityException','ProviderNotFoundException', 'CompanyNotDeletedException', 'CompanyNotUpdateException', 'CompanyNotSaveException', 'CompanyNotDeleteOrSaveException', 'SaveProviderException', 'CreateObjectProviderException', 'GetCompanyException']

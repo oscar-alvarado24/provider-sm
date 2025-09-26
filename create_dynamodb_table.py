@@ -158,7 +158,7 @@ class DynamoDBTableCreator:
                                 'KeyType': 'HASH'
                             },
                             {
-                                'AttributeName': 'company_name',
+                                'AttributeName': 'service_name',
                                 'KeyType': 'RANGE'
                             }
                         ],

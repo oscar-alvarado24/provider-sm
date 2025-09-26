@@ -1,6 +1,0 @@
-fastapi
-uvicorn[standard]
-pydantic
-pydantic-settings
-boto3
-python-dotenv

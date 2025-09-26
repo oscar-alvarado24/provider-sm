@@ -1,4 +1,3 @@
-
 from typing import  Optional
 from decimal import Decimal
 
@@ -12,12 +11,14 @@ class Company:
     email: str
     phone: str
     created_at: Optional[str] = None
+    updated_at: Optional[str] = None
 
 
 @dataclass
 class Service:
     service_name: str
     price: Decimal
+    updated_at: Optional[str] = None
 
 @dataclass
 class Branch:
@@ -25,8 +26,10 @@ class Branch:
     city: str
     address: str
     phone: str
+    email: str
+    manager: str
     services: list[Service]
-    manager: Optional[str] = None
+    updated_at: Optional[str] = None
 
 @dataclass
 class Provider:
