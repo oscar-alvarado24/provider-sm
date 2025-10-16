@@ -207,3 +207,5 @@ ies to
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+
+create_dynamodb_table.py
