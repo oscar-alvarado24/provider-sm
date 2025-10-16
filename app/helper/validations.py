@@ -42,30 +42,34 @@ class Validation:
             return ["Al menos una sucursal es requerida"]
         
         errors = []
-        for i, branch in enumerate(branches):
-            branch_errors = self._validate_single_branch(branch, i + 1)
+        for branch in branches:
+            branch_errors = self._validate_single_branch(branch)
             errors.extend(branch_errors)
         
         return errors
 
-    def _validate_single_branch(self, branch: Branch, branch_number: int) -> List[str]:
+    def _validate_single_branch(self, branch: Branch, ) -> List[str]:
         """
         Validate a single branch and return list of errors
         """
         errors = []
         
+        # Validate branche_id
+        if " | " in branch.branch_id:
+            errors.append("El branch_id no puede llevar  | ")
+        
         # Validate required fields
-        errors.extend(self._validate_required_fields(branch, branch_number))
+        errors.extend(self._validate_required_fields(branch))
         
         # Validate manager field
-        errors.extend(self._validate_manager_field(branch, branch_number))
+        errors.extend(self._validate_manager_field(branch))
         
         # Validate services
-        errors.extend(self._validate_branch_services(branch, branch_number))
+        errors.extend(self._validate_branch_services(branch))
         
         return errors
 
-    def _validate_required_fields(self, branch: Branch, branch_number: int) -> List[str]:
+    def _validate_required_fields(self, branch: Branch) -> List[str]:
         """
         Validate required fields for a branch
         """
@@ -74,31 +78,32 @@ class Validation:
             'city': 'Ciudad',
             'address': 'Dirección', 
             'phone': 'Teléfono',
-            'branch_name': 'Nombre de sucursal'
+            'branch_name': 'Nombre de sucursal',
+            'branch_id':'id de la sucursal'
         }
         
         for field, field_name in required_fields.items():
             if not getattr(branch, field, None):
-                errors.append(f"{field_name} es requerida para sucursal {branch_number}")
+                errors.append(f"{field_name} es requerida para sucursal {branch.branch_name}")
         
         return errors
 
-    def _validate_manager_field(self, branch: Branch, branch_number: int) -> List[str]:
+    def _validate_manager_field(self, branch: Branch) -> List[str]:
         """
         Validate manager field for a branch
         """
         if branch.manager and not isinstance(branch.manager, str):
-            return [f"Manager debe ser un string para sucursal {branch_number}"]
+            return [f"Manager debe ser un string para sucursal {branch.branch_name}"]
         return []
 
-    def _validate_branch_services(self, branch: Branch, branch_number: int) -> List[str]:
+    def _validate_branch_services(self, branch: Branch) -> List[str]:
         """
         Validate services for a branch
         """
         errors = []
         
         if not hasattr(branch, 'services') or not branch.services:
-            errors.append(f"Al menos un servicio es requerido para sucursal {branch_number}")
+            errors.append(f"Al menos un servicio es requerido para sucursal {branch.branch_name}")
         else:
             errors.extend(self._validate_service_data(branch.services))
         

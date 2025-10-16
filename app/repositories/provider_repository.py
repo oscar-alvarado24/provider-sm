@@ -1,8 +1,9 @@
 from app.repositories.connetion import DynamoConnection
-from typing import List, Optional, Dict, Any
-from app.core.exception import BatchWriteException, GetProviderByIdException, SearchByServiceAndCityException, ProviderNotFoundException, CompanyNotDeletedException, CompanyNotUpdateException, CompanyNotSaveException, CompanyNotDeleteOrSaveException, SaveProviderException, GetCompanyException
+from typing import List, Dict, Any, cast
+from app.core.exception import BatchWriteException, GetProviderByIdException, SearchByServiceAndCityException, ProviderNotFoundException, CompanyNotDeletedException, CompanyNotUpdateException, GetCompanyException, BranchNotFoundException, GetBranchByIdException, DeleteProviderException
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class ProviderRepository:
     def __init__(self) -> None:
@@ -26,7 +27,7 @@ class ProviderRepository:
             }
             
             try:
-                response = self.dynamo_connection.table.meta.client.batch_write_item(RequestItems=request_items)
+                response = self.dynamo_connection.table.meta.client.batch_write_item(RequestItems=cast(Dict[str, Any], request_items))
                 
                 # Manejar items no procesados (si los hay)
                 unprocessed = response.get('UnprocessedItems', {})
@@ -43,11 +44,11 @@ class ProviderRepository:
     
     def get_provider_by_id(self, company_id: str) -> List[Dict[str, Any]]:
         """
-        Obtiene un proveedor completo con toda su información
+        Get a complete supplier with all their information
         """
         try:
             response = self.dynamo_connection.table.query(
-                KeyConditionExpression=Key('CompanyID').eq(company_id)
+                KeyConditionExpression=Key('company_id').eq(company_id)
             )
             
             items = response.get('Items', [])
@@ -69,7 +70,7 @@ class ProviderRepository:
         try:
             response = self.dynamo_connection.table.get_item(
                 Key={
-                    'CompanyID': company_id,
+                    'company_id': company_id,
                     'SK': '#metadata'
                 }
             )
@@ -82,11 +83,56 @@ class ProviderRepository:
                 raise e
             print(f"Error obteniendo empresa: {e}")
             raise GetCompanyException(f"Error obteniendo empresa: {e}")
+        
+    def _get_single_branch(self, company_id: str, branch_id: str) -> List[Dict[str, Any]]:
+        """Helper method to get a single branch using GSI"""
+        try:
+            response = self.dynamo_connection.table.query(
+                IndexName='BranchDataLookup',
+                KeyConditionExpression='company_id = :company_id AND branch_id = :branch_id',
+                ExpressionAttributeValues={
+                    ':company_id': company_id,
+                    ':branch_id': branch_id
+                }
+            )
+            return response.get('Items', [])
+        except Exception:
+            return []
+    
+    def get_branches_by_ids(self, branch_data: List[Dict[str, str]]) -> List[Dict[str, Any]]:
+        """
+        Get multiple branches using GSI BranchDataLookup with parallel execution
+        branch_data: [{"company_id": "123", "branch_id": "branch_001"}, ...]
+        """
+        try:
+            branches = []
+            valid_ids = [(data['company_id'], data['branch_id']) 
+                        for data in branch_data 
+                        if data.get('company_id') and data.get('branch_id')]
+            
+            if not valid_ids:
+                return []
+            
+            # Ejecutar consultas en paralelo
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_branch = {executor.submit(self._get_single_branch, company_id, branch_id): (company_id, branch_id) 
+                                   for company_id, branch_id in valid_ids}
+                
+                for future in as_completed(future_to_branch):
+                    items = future.result()
+                    if items:
+                        branches.extend(items)
+            
+            return branches
+            
+        except Exception as e:
+            print(f"Error obteniendo sucursales por IDs: {e}")
+            raise GetBranchByIdException(f"Error obteniendo sucursales por IDs: {e}")
     # ==================== MÉTODOS DE BÚSQUEDA ====================
     
     def search_providers_by_service_and_city(self, service_name: str, city: str) -> List[Dict[str, Any]]:
         """
-        Busca proveedores que ofrecen un servicio específico en una ciudad específica
+        Search for providers that offer a specific service in a specific city
         """
         service_key = service_name.lower().replace(" ", "_")
         city_key = city.lower()
@@ -109,13 +155,59 @@ class ProviderRepository:
         except Exception as e:
             raise SearchByServiceAndCityException(f"Error buscando proveedores: {e}")
 
+    def _is_branch_unique(self, branch_id: str) -> bool:
+        """Helper method to check if branch_id is unique"""
+        try:
+            response = self.dynamo_connection.table.query(
+            IndexName='branch_id-index', 
+            KeyConditionExpression='branch_id = :branch_id',
+            ExpressionAttributeValues={
+                ':branch_id': branch_id
+            },
+            Select='COUNT'
+            )
+            count = response.get('Count', 0)
+            return count == 0
+        except Exception as e:
+            print(f"Error validando branch_id {branch_id}: {e}")
+            return False
+         
+
+    def validate_branch_ids_uniqueness(self, branch_ids: List[str]) -> Dict[str, bool]:
+        """
+        Validates that multiple branch_ids are unique using parallel execution
+        Returns a dictionary where non-unique branch_ids (already existing) have the value True
+        """
+        try:
+            non_unique_ids = {}
+            
+            if not branch_ids:
+                return {}
+            
+            # Ejecutar validaciones en paralelo
+            with ThreadPoolExecutor(max_workers=10) as executor:
+                future_to_branch = {executor.submit(self._is_branch_unique, branch_id): branch_id 
+                                    for branch_id in branch_ids}
+                
+                for future in as_completed(future_to_branch):
+                    branch_id = future_to_branch[future]
+                    is_unique = future.result()
+                    if not is_unique:  
+                        non_unique_ids[branch_id] = True
+                                
+            return non_unique_ids
+            
+        except Exception as e:
+            print(f"Error validando unicidad de branch_ids: {e}")
+            raise GetBranchByIdException(f"Error validando unicidad de branch_ids: {e}")        
+    
     # ==================== MÉTODOS DE ACTUALIZACIÓN ====================
     
     def update_company(self, company_id: str, update_expression: str, expression_attribute_values: Dict[str, Any]) -> None:
         try:
             self.dynamo_connection.table.update_item(
                     Key={
-                        'CompanyID': company_id,
+                        'company_id': company_id,
                         'SK': '#metadata'
                     },
                     UpdateExpression=update_expression,
@@ -132,7 +224,7 @@ class ProviderRepository:
         try:
             # Obtener todos los elementos del proveedor
             response = self.dynamo_connection.table.query(
-                KeyConditionExpression=Key('CompanyID').eq(company_id)
+                KeyConditionExpression=Key('company_id').eq(company_id)
             )
             
             items = response.get('Items', [])
@@ -144,7 +236,7 @@ class ProviderRepository:
             for item in items:
                 delete_requests.append({
                     'DeleteRequest': {
-                        'Key': {'CompanyID': item['CompanyID'], 'SK': item['SK']}
+                        'Key': {'company_id': item['company_id'], 'SK': item['SK']}
                     }
                 })
             
@@ -154,7 +246,7 @@ class ProviderRepository:
                 batch = delete_requests[i:i + batch_size]
                 request_items = {self.dynamo_connection.table_name: batch}
                 
-                response = self.dynamo_connection.table.meta.client.batch_write_item(RequestItems=request_items)
+                response = self.dynamo_connection.table.meta.client.batch_write_item(RequestItems=cast(Dict[str, Any], request_items))
                 
                 # Manejar items no procesados
                 unprocessed = response.get('UnprocessedItems', {})
@@ -166,4 +258,5 @@ class ProviderRepository:
             return True
             
         except ClientError as e:
-            raise Exception(f"Error eliminando proveedor: {e}")
+            raise DeleteProviderException(f"Error eliminando proveedor: {e}")
+    

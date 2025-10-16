@@ -10,4 +10,7 @@ from .CompanyNotDeleteOrSaveException import CompanyNotDeleteOrSaveException
 from .SaveProviderException import SaveProviderException
 from .CreateObjectProviderException import CreateObjectProviderException
 from .GetCompanyException import GetCompanyException
-__all__ = ['CreateProviderException', 'BatchWriteException', 'GetProviderByIdException', 'SearchByServiceAndCityException','ProviderNotFoundException', 'CompanyNotDeletedException', 'CompanyNotUpdateException', 'CompanyNotSaveException', 'CompanyNotDeleteOrSaveException', 'SaveProviderException', 'CreateObjectProviderException', 'GetCompanyException']
+from .BranchNotFoundException import BranchNotFoundException
+from .GetBranchByIdException import GetBranchByIdException
+from .DeleteProviderException import DeleteProviderException
+__all__ = ['CreateProviderException', 'BatchWriteException', 'GetProviderByIdException', 'SearchByServiceAndCityException','ProviderNotFoundException', 'CompanyNotDeletedException', 'CompanyNotUpdateException', 'CompanyNotSaveException', 'CompanyNotDeleteOrSaveException', 'SaveProviderException', 'CreateObjectProviderException', 'GetCompanyException', 'BranchNotFoundException', 'GetBranchByIdException', 'DeleteProviderException']

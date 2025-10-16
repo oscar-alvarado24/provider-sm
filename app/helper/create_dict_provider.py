@@ -13,7 +13,7 @@ class GenerateDictProvider:
         all_items.append(self._prepare_company_item(company))
 
         # 2. Prepare branch items 
-        all_items.extend(self._prepare_branch_and_services_items(company.company_id, company.company_name, branches))
+        all_items.extend(self._prepare_branch_and_services_items(company.company_id, branches))
         return all_items
         
     def _get_timestamp(self) -> str:
@@ -26,14 +26,14 @@ class GenerateDictProvider:
         company_dict = asdict(company)
         company_dict.pop('company_id', None)        
         return {
-            'CompanyID': f'{company.company_id}',
+            'company_id': f'{company.company_id}',
             'SK': '#metadata',
             'EntityType': 'company',
             'created_at': company.created_at,
             **company_dict
         }
 
-    def _prepare_branch_and_services_items(self, company_id: str,company_name: str, branches: List[Branch]) -> List[Dict[str, Any]]:
+    def _prepare_branch_and_services_items(self, company_id: int, branches: List[Branch]) -> List[Dict[str, Any]]:
         """Prepara los items de las sucursales para DynamoDB"""
         branch_and_services_items = []
         
@@ -48,20 +48,20 @@ class GenerateDictProvider:
         
         return branch_and_services_items
     
-    def _prepare_branch_items(self, company_id: str, branch: Dict[str, Any], branch_name: str, city:str) -> Dict[str, Any]:
+    def _prepare_branch_items(self, company_id: int, branch: Dict[str, Any], branch_name: str, city:str) -> Dict[str, Any]:
         """Prepara el item de la sucursal para DynamoDB"""
     
         return {
-            'CompanyID': f'{company_id}',
+            'company_id': f'{company_id}',
             'SK': f'city#{city}#{branch_name}',
             'EntityType': 'branch',
             **branch
         }
-    
-    def _prepare_service_item(self, company_id: str, branch_name: str, service: Service, city:str) -> Dict[str, Any]:
+
+    def _prepare_service_item(self, company_id: int, branch_name: str, service: Service, city:str) -> Dict[str, Any]:
         service_key = service.service_name.lower().replace(" ", "_")
         return {
-            'CompanyID': f'{company_id}',
+            'company_id': f'{company_id}',
             'SK': f'city#{city}#{branch_name}#service#{service_key}',  
             'EntityType': 'branch-service',
             'GSI1PK': f'service#{service_key}#city#{city}',

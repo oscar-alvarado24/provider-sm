@@ -1,0 +1,193 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: 'Lightsail Container Deployment for FastAPI Microservice'
+
+Parameters:
+  ServiceName:
+    Type: String
+    Default: provider-microservice
+    Description: Name of the microservice
+  
+  ContainerImage:
+    Type: String
+    Description: ECR Image URI for the container
+    Default: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/provider:latest"
+  
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues:
+      - development
+      - staging
+      - production
+  
+  Port:
+    Type: Number
+    Default: 8000
+    Description: Container port to expose
+  
+  CPU:
+    Type: String
+    Default: micro
+    AllowedValues:
+      - nano
+      - micro
+      - small
+      - medium
+      - large
+      - xlarge
+  
+  Memory:
+    Type: String
+    Default: 1GB
+    AllowedValues:
+      - 512MB
+      - 1GB
+      - 2GB
+      - 4GB
+      - 8GB
+
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 2
+
+Globals:
+  Function:
+    Timeout: 30
+
+Resources:
+  # Lightsail Container Service
+  FastAPIContainerService:
+    Type: AWS::Lightsail::Container
+    Properties:
+      ServiceName: !Sub "${ServiceName}-${Environment}"
+      Power: !Ref CPU
+      Scale: !Ref DesiredCount
+      ContainerServiceDeployment:
+        Containers:
+          - ContainerName: !Ref ServiceName
+            Image: !Ref ContainerImage
+            Environment:
+              - Name: APP_ENV
+                Value: !Ref Environment
+              - Name: PORT
+                Value: !Ref Port
+              - Name: SERVICE_NAME
+                Value: !Ref ServiceName
+              - Name: AWS_REGION
+                Value: !Ref AWS::Region
+            Ports:
+              - !Ref Port
+        PublicEndpoint:
+          ContainerName: !Ref ServiceName
+          ContainerPort: !Ref Port
+
+  # IAM Role for the container service
+  ContainerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lightsail.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLightsailContainerServiceRolePolicy
+      RoleName: !Sub "${ServiceName}-container-service-role-${Environment}"
+
+  # ECR Repository Policy (if creating ECR via SAM)
+  ECRRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "lightsail-${ServiceName}-${Environment}"
+      ImageTagMutability: MUTABLE
+      RepositoryPolicyText:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lightsail.amazonaws.com
+            Action:
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:BatchCheckLayerAvailability
+
+  # CloudWatch Log Group for container logs
+  ContainerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/lightsail/container/${ServiceName}-${Environment}"
+      RetentionInDays: 30
+
+  # Custom Resource to trigger deployment (optional)
+  DeploymentTrigger:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.9
+      Handler: index.lambda_handler
+      Role: !GetAtt DeploymentTriggerRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import cfnresponse
+          
+          def lambda_handler(event, context):
+              lightsail = boto3.client('lightsail')
+              
+              if event['RequestType'] == 'Create' or event['RequestType'] == 'Update':
+                  service_name = event['ResourceProperties']['ServiceName']
+                  try:
+                      # Get current deployment and trigger update if needed
+                      response = lightsail.get_container_services(serviceName=service_name)
+                      cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+                  except Exception as e:
+                      cfnresponse.send(event, context, cfnresponse.FAILED, {'Error': str(e)})
+              else:
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+
+  DeploymentTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: LightsailAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - lightsail:GetContainerServices
+                  - lightsail:CreateContainerServiceDeployment
+                Resource: '*'
+
+Outputs:
+  ServiceURL:
+    Description: URL to access the FastAPI microservice
+    Value: !GetAtt FastAPIContainerService.Url
+    Export:
+      Name: !Sub "${ServiceName}-${Environment}-URL"
+
+  ServiceName:
+    Description: Lightsail Container Service Name
+    Value: !Ref FastAPIContainerService
+    Export:
+      Name: !Sub "${ServiceName}-${Environment}-Name"
+
+  ECRRepositoryURI:
+    Description: ECR Repository URI for container images
+    Value: !GetAtt ECRRepository.RepositoryUri
+    Export:
+      Name: !Sub "${ServiceName}-${Environment}-ECR-URI"

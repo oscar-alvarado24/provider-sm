@@ -5,7 +5,7 @@ from dataclasses import dataclass
 
 @dataclass
 class Company:
-    company_id: str
+    company_id: int
     address: str
     company_name: str
     email: str
@@ -22,6 +22,7 @@ class Service:
 
 @dataclass
 class Branch:
+    branch_id: str
     branch_name: str
     city: str
     address: str

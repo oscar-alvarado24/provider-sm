@@ -1,15 +1,7 @@
-import os
-import uuid
-from typing import List, Optional, Dict, Any
+from typing import List, Dict
 
-from collections import defaultdict
-
-import boto3
-from botocore.exceptions import ClientError
-from boto3.dynamodb.conditions import Attr, Key
-from app.repositories.connetion import DynamoConnection
-from app.entities import Company, Branch, Service, Provider
-from app.core.exception import CreateProviderException, BatchWriteException, GetProviderByIdException, SearchByServiceAndCityException, ProviderNotFoundException, CompanyNotDeletedException, CompanyNotUpdateException, CompanyNotSaveException, CompanyNotDeleteOrSaveException, SaveProviderException
+from app.entities import Company, Branch,  Provider
+from app.core.exception import BranchNotFoundException, CreateProviderException, GetProviderByIdException, ProviderNotFoundException, CompanyNotUpdateException, GetBranchByIdException
 from app.repositories.provider_repository import ProviderRepository
 from app.helper.create_dict_provider import GenerateDictProvider
 from app.helper.validations import Validation
@@ -20,7 +12,16 @@ class DynamoDBService:
         self.generate_dict_provider = GenerateDictProvider()
         self.validation = Validation()
         self.generate_provider = CreateProvider()
-
+        
+    def _validate_branches_unique(self, branches_ids: List[str]) -> List[str]:
+        branch_not_unique=[]
+        results = self.repository.validate_branch_ids_uniqueness(branches_ids)
+    # Encuentra los branch_ids que no son únicos
+    
+        for branch_id, is_non_unique in results.items():
+            if is_non_unique:
+                branch_not_unique.append(f"Branch ID {branch_id} already exists")
+        return  branch_not_unique   
     def create_provider(self, provider: Provider) -> str:
         """
         Create  provider complete (company + branches + services) of transactional form
@@ -50,6 +51,19 @@ class DynamoDBService:
                 raise e
             print(f"Error obteniendo proveedor por ID: {e}")
             raise GetProviderByIdException(f"Error obteniendo proveedor por ID: {e}")
+
+    def get_branches(self, branch_data: List[Dict[str, str]]) -> List[Branch]:
+        """
+        Get branch by company_id and branch_id
+        """
+        try:
+            items = self.repository.get_branches_by_ids(branch_data)
+            return self.generate_provider.create_branches_from_dict_list(items)
+        except Exception as e:
+            if isinstance(e, BranchNotFoundException):
+                raise e
+            print(f"Error obteniendo sucursal por ID: {e}")
+            raise GetBranchByIdException(f"Error obteniendo sucursal por ID: {e}")
 
     def update_company(self, company_id: str, update_company: Company) -> str:
         """

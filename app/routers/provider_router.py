@@ -1,8 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import List, Optional
-from app.entities.provider import Provider, Company, Branch, Service
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Dict, List
+from app.entities.provider import Provider, Company, Branch
+from app.helper.branch_data import BranchData
+from app.middlewares.auth.dependencies import require_groups
 from app.services.dynamodb_service import DynamoDBService
-from app.core.config import settings as app_settings
 
 def get_db_service():
     """Dependency to get DynamoDB service"""
@@ -31,13 +32,21 @@ router = APIRouter(
              summary="Create new provider")
 async def create_provider_endpoint(
     provider: Provider, 
-    db_service: DynamoDBService = Depends(get_db_service)
+    db_service: DynamoDBService = Depends(get_db_service),
+    current_user: Dict = Depends(require_groups(["pacientes"]))
 ):
     """
     Create a new provider with the given details.
     """
-    try:        
+    try:  
+        print(f"Creating provider: {provider.company.company_name}")      
         # Crear el proveedor
+        validations_branch_unique = db_service._validate_branches_unique( [branch.branch_id for branch in provider.branches])
+        if len(validations_branch_unique)>0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail= list(validations_branch_unique)
+            )
         created_provider = db_service.create_provider(provider)
         return created_provider
     except HTTPException:
@@ -49,11 +58,12 @@ async def create_provider_endpoint(
             detail=f"Error interno del servidor: {str(e)}"
         )
 
-@router.get("/{company_id}", response_model=Provider, 
+@router.get("/company/{company_id}", response_model=Provider, 
             summary="Get provider by ID")
 async def get_provider_endpoint(
     company_id: str,
-    db_service: DynamoDBService = Depends(get_db_service)
+    db_service: DynamoDBService = Depends(get_db_service),
+    current_user: Dict = Depends(require_groups(["pacientes"]))
 ):
     """Get provider by company ID"""
     try:
@@ -67,6 +77,36 @@ async def get_provider_endpoint(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error interno del servidor: {str(e)}"
         )
+
+@router.get("/branches", response_model=List[Branch], 
+            summary="Get a branches by company id and branch id")
+async def get_branch_endpoint(
+    keys: str = Query(..., description="Listado de claves company_id | branch_id"),
+    db_service: DynamoDBService = Depends(get_db_service),
+    current_user: Dict = Depends(require_groups(["pacientes"]))
+):
+    """Get branch by company ID and branch ID"""
+    try:
+        keys_list = keys.split(",")
+        branches_data=[]
+        for branch_str in keys_list:
+            if " | " in branch_str:
+                company_id, branch_id = branch_str.split(" | ", 1)
+                print(f"se recibe el compani id {company_id} y el branch id {branch_id}")
+                branches_data.append(BranchData(
+                    company_id=company_id.strip(),
+                    branch_id=branch_id.strip()
+                ))
+        return db_service.get_branches([branch.model_dump() for branch in branches_data])
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error get branches: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error interno del servidor: {str(e)}"
+        )
+
 @router.put("/update-company/{company_id}", response_model=str,
             summary="Update company information")
 async def update_company_endpoint(
