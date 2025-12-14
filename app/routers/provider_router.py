@@ -2,8 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from typing import Dict, List
 from app.entities.provider import Provider, Company, Branch
 from app.helper.branch_data import BranchData
+from app.helper.crypto import CryptoService
 from app.middlewares.auth.dependencies import require_groups
 from app.services.dynamodb_service import DynamoDBService
+from app.core.config import settings
 
 def get_db_service():
     """Dependency to get DynamoDB service"""
@@ -22,7 +24,13 @@ def get_db_service():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"An unexpected error occurred while setting up the database service: {e}"
         )
-
+        
+def get_cripto_instance():
+    try:
+        crypto_instance = CryptoService(settings.secret_key)
+        return crypto_instance
+    except Exception as e:
+        print(f"error: {e}")
 router = APIRouter(
     prefix="/providers",
     tags=["Providers"],
@@ -83,11 +91,14 @@ async def get_provider_endpoint(
 async def get_branch_endpoint(
     keys: str = Query(..., description="Listado de claves company_id | branch_id"),
     db_service: DynamoDBService = Depends(get_db_service),
-    current_user: Dict = Depends(require_groups(["pacientes"]))
+    current_user: Dict = Depends(require_groups(["pacientes"])),
+    cripto_service: CryptoService = Depends(get_cripto_instance)
 ):
     """Get branch by company ID and branch ID"""
     try:
-        keys_list = keys.split(",")
+        print(f'El valor recivido es: {keys}')
+        keys_decripted= cripto_service.decrypt(keys)
+        keys_list = keys_decripted.split(",")
         branches_data=[]
         for branch_str in keys_list:
             if " | " in branch_str:
