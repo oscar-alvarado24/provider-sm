@@ -64,7 +64,7 @@ USER app
 EXPOSE ${PORT}
 
 # Health check más robusto
-HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD curl -f http://localhost:${PORT}/health || exit 1
 
 # Comando optimizado para producción
