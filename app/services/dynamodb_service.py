@@ -1,11 +1,14 @@
+import logging
 from typing import List, Dict
-
 from app.entities import Company, Branch,  Provider
 from app.core.exception import BranchNotFoundException, CreateProviderException, GetProviderByIdException, ProviderNotFoundException, CompanyNotUpdateException, GetBranchByIdException
 from app.repositories.provider_repository import ProviderRepository
 from app.helper.create_dict_provider import GenerateDictProvider
 from app.helper.validations import Validation
 from app.helper.create_provider import CreateProvider
+
+logger = logging.getLogger(__name__)
+
 class DynamoDBService:
     def __init__(self):
         self.repository = ProviderRepository()
@@ -57,7 +60,9 @@ class DynamoDBService:
         Get branch by company_id and branch_id
         """
         try:
+            logger.debug("Branches required: {branch_data}")
             items = self.repository.get_branches_by_ids(branch_data)
+            logger.debug("Items found: {items}")
             return self.generate_provider.create_branches_from_dict_list(items)
         except Exception as e:
             if isinstance(e, BranchNotFoundException):

@@ -190,8 +190,7 @@ Code.gitignore
 ualStudioCode.gitignore
 #  and can be added to the global gitignore or merged into this file. However, i
 f you prefer,
-#  you could uncomment the following to ignore the enitre vscode folder
-# .vscode/
+ .vscode/*
 
 # Ruff stuff:
 .ruff_cache/

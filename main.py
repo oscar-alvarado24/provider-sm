@@ -1,21 +1,33 @@
 """
 Module that contain start configurations for deploy microservice
 """
+import logging
 import os
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from app.core.log_requests_middleware import LogRequestsMiddleware
 from app.routers import provider_router
 from app.core.config import settings
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logging.getLogger("watchfiles").setLevel(logging.WARNING)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title=settings.app_name,
     version=settings.app_version,
     description="A microservice for managing provider information using FastAPI and DynamoDB."
 )
+
+app.add_middleware(LogRequestsMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,22 +37,24 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization", "X-Custom-Header"],
     max_age=3600,
 )
+
 @app.options("/{full_path:path}")
-async def options_handler():
+async def options_handler(_full_path: str):
     """
-    Function for define json response
+    Handle preflight CORS requests.
     """
     return JSONResponse(
         content={},
         status_code=200
     )
+
 # Include the providers router
 app.include_router(provider_router.router)
 
 @app.get("/health", tags=["Root"])
 async def root():
     """
-    path for create a heath endpoint
+    Health check endpoint.
     """
     return {"message": f"Welcome to the {settings.app_name} v{settings.app_version}"}
 if __name__ == "__main__":
@@ -49,5 +63,7 @@ if __name__ == "__main__":
         "main:app",
         host="0.0.0.0",
         port=8050,
-        reload=False
+        reload=False,
+        reload_excludes=["__pycache__/*", ".git/*", "*.pyc"],
+        log_level="debug"
     )
