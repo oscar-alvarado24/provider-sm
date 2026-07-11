@@ -18,7 +18,7 @@ This microservice manages provider information, including companies, their servi
 
 ## Tech Stack 🛠️
 
-*   **Language:** Python 3.11
+*   **Language:** Python 3.14.2
 *   **Framework:** FastAPI
 *   **Database:** AWS DynamoDB
 *   **Containerization:** Docker
@@ -201,9 +201,9 @@ No license information was found in the repository. Please refer to the project 
 ## Important Links 🔗
 
 *   **Repository:** [https://github.com/oscar-alvarado24/provider-sm](https://github.com/oscar-alvarado24/provider-sm)
-*   **Author:** oscar-alvarado24
+*   **Author:** Oscar Alvarado
 
---- 
+---
 
 ## Footer 🌟
 
